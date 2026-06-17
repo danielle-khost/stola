@@ -1,0 +1,269 @@
+import csv
+import gzip
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from toga4cnee.candidates import write_candidates
+from toga4cnee.index import build_index, load_index
+from toga4cnee.overlap import calculate_overlap_rows, write_overlap_stats
+from toga4cnee.summary import summarize_overlap_stats
+from toga4cnee.workflow import run_workflow
+
+
+CHAIN_TEXT = "\n".join(
+    [
+        "chain 100 chr1 1000 + 100 300 chrQ 1000 + 500 650 1",
+        "50 50 0",
+        "100",
+        "",
+        "chain 200 chr1 1000 + 110 240 chrQ2 1000 - 100 230 2",
+        "130",
+        "",
+        "chain 50 chr2 1000 + 100 300 chrQ3 1000 + 400 500 3",
+        "50 100 0",
+        "50",
+        "",
+    ]
+)
+
+
+def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    chain = tmp_path / "test.chain"
+    bed = tmp_path / "cnees.bed"
+    chain.write_text(CHAIN_TEXT, encoding="utf-8")
+    bed.write_text(
+        "\n".join(
+            [
+                "chr1\t120\t240\tCNEE_PARTIAL",
+                "chr2\t175\t225\tCNEE_GAPPED",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return chain, bed
+
+
+def _read_tsv(path: Path) -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_build_index_records_byte_offsets_and_extractable_plain_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, _ = _write_inputs(tmp_path)
+            index = tmp_path / "index.json"
+
+            payload = build_index(chain, index)
+            _, records = load_index(index)
+
+        self.assertEqual(payload["chain_count"], 3)
+        self.assertEqual(records[0].chain_id, "1")
+        self.assertEqual(records[0].start_byte, 0)
+        self.assertGreater(records[1].start_byte, records[0].start_byte)
+        self.assertGreater(records[0].byte_length, 0)
+
+    def test_build_index_auto_decompresses_gzipped_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, _ = _write_inputs(tmp_path)
+            gz_chain = tmp_path / "test.chain.gz"
+            gz_chain.unlink(missing_ok=True)
+            with gzip.open(gz_chain, "wb") as handle:
+                handle.write(chain.read_bytes())
+            index = tmp_path / "gz-index.json"
+
+            payload = build_index(gz_chain, index)
+            _, records = load_index(index)
+
+            self.assertEqual(payload["chain_count"], 3)
+            self.assertEqual(Path(payload["indexed_chain_path"]).name, "test.chain")
+            self.assertEqual(
+                Path(payload["indexed_chain_path"]).read_text(encoding="utf-8"),
+                CHAIN_TEXT,
+            )
+            self.assertEqual(records[2].chain_id, "3")
+
+    def test_candidate_chains_selects_span_overlaps_including_gapped_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            build_index(chain, index)
+
+            count = write_candidates(index, bed, candidates)
+            rows = _read_tsv(candidates)
+
+        self.assertEqual(count, 3)
+        self.assertEqual(
+            [(row["cnee_id"], row["chain_id"]) for row in rows],
+            [
+                ("CNEE_PARTIAL", "2"),
+                ("CNEE_PARTIAL", "1"),
+                ("CNEE_GAPPED", "3"),
+            ],
+        )
+        self.assertEqual(rows[2]["span_overlap_bases"], "50")
+
+    def test_candidate_chains_match_unique_ncbi_version_suffix_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, _ = _write_inputs(tmp_path)
+            bed = tmp_path / "versioned_cnees.bed"
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            bed.write_text("chr1.1\t120\t240\tCNEE_VERSIONED\n", encoding="utf-8")
+            build_index(chain, index)
+
+            count = write_candidates(index, bed, candidates)
+            rows = _read_tsv(candidates)
+
+        self.assertEqual(count, 2)
+        self.assertEqual({row["chain_id"] for row in rows}, {"1", "2"})
+        self.assertEqual({row["ref_chrom"] for row in rows}, {"chr1.1"})
+
+    def test_overlap_stats_compute_coverage_gaps_flanks_and_ranks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            build_index(chain, index)
+            write_candidates(index, bed, candidates)
+
+            rows = calculate_overlap_rows(index, candidates, flank_size=25)
+            by_pair = {(row["cnee_id"], row["chain_id"]): row for row in rows}
+
+        partial_chain_1 = by_pair[("CNEE_PARTIAL", "1")]
+        self.assertEqual(partial_chain_1["cnee_len"], 120)
+        self.assertEqual(partial_chain_1["aligned_bases"], 70)
+        self.assertEqual(partial_chain_1["gap_bases_within_chain_span"], 50)
+        self.assertEqual(partial_chain_1["query_aligned_start"], 520)
+        self.assertEqual(partial_chain_1["query_aligned_end"], 590)
+        self.assertEqual(partial_chain_1["query_block_count"], 1)
+        self.assertEqual(partial_chain_1["query_block_sizes"], "70,")
+        self.assertEqual(partial_chain_1["query_block_starts"], "0,")
+        self.assertEqual(partial_chain_1["left_flank_len"], 25)
+        self.assertEqual(partial_chain_1["left_flank_aligned_bases"], 20)
+        self.assertEqual(partial_chain_1["right_flank_aligned_bases"], 25)
+        self.assertEqual(partial_chain_1["num_candidate_chains_for_cnee"], 2)
+        self.assertEqual(partial_chain_1["rank_by_chain_score"], 2)
+
+        partial_chain_2 = by_pair[("CNEE_PARTIAL", "2")]
+        self.assertEqual(partial_chain_2["aligned_bases"], 120)
+        self.assertEqual(partial_chain_2["gap_bases_within_chain_span"], 0)
+        self.assertEqual(partial_chain_2["query_aligned_start"], 770)
+        self.assertEqual(partial_chain_2["query_aligned_end"], 890)
+        self.assertEqual(partial_chain_2["rank_by_chain_score"], 1)
+
+        gapped = by_pair[("CNEE_GAPPED", "3")]
+        self.assertEqual(gapped["aligned_bases"], 0)
+        self.assertEqual(gapped["gap_bases_within_chain_span"], 50)
+        self.assertEqual(gapped["query_aligned_start"], ".")
+        self.assertEqual(gapped["query_aligned_end"], ".")
+        self.assertEqual(gapped["query_block_count"], 0)
+
+    def test_end_to_end_writes_overlap_stats_tsv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            stats = tmp_path / "overlap_stats.tsv"
+
+            build_index(chain, index)
+            write_candidates(index, bed, candidates)
+            count = write_overlap_stats(index, bed, candidates, stats, flank_size=25)
+
+            rows = _read_tsv(stats)
+
+        self.assertEqual(count, 3)
+        self.assertEqual(rows[0]["cnee_id"], "CNEE_PARTIAL")
+        self.assertEqual(rows[0]["chain_id"], "2")
+        self.assertEqual(rows[0]["aligned_bases"], "120")
+        self.assertEqual(rows[-1]["cnee_id"], "CNEE_GAPPED")
+
+    def test_summary_from_overlap_stats_uses_aligned_rows_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            stats = tmp_path / "overlap_stats.tsv"
+            summary = tmp_path / "summary.tsv"
+
+            build_index(chain, index)
+            write_candidates(index, bed, candidates)
+            write_overlap_stats(index, bed, candidates, stats, flank_size=25)
+            count = summarize_overlap_stats(stats, summary, cnee_bed=bed)
+            rows = _read_tsv(summary)
+
+        self.assertEqual(count, 2)
+        self.assertEqual(rows[0]["cnee_id"], "CNEE_PARTIAL")
+        self.assertEqual(rows[0]["num_query_alignments"], "2")
+        self.assertEqual(rows[0]["overlap_fractions"], "1.0,0.5833333333333334")
+        self.assertEqual(rows[0]["gap_bases"], "0,50")
+        self.assertEqual(rows[1]["cnee_id"], "CNEE_GAPPED")
+        self.assertEqual(rows[1]["num_query_alignments"], "0")
+        self.assertEqual(rows[1]["overlap_fractions"], "")
+        self.assertEqual(rows[1]["gap_bases"], "")
+
+    def test_single_workflow_writes_stats_and_query_bed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            stats = tmp_path / "overlap_stats.tsv"
+            query_bed = tmp_path / "query_cnees.bed"
+            summary = tmp_path / "summary.tsv"
+            alignment_histogram = tmp_path / "alignment_hist.svg"
+            overlap_density = tmp_path / "overlap_density.svg"
+            work_dir = tmp_path / "work"
+
+            result = run_workflow(
+                chain,
+                bed,
+                query_bed,
+                stats,
+                out_summary=summary,
+                out_alignment_histogram=alignment_histogram,
+                out_overlap_density=overlap_density,
+                flank_size=25,
+                work_dir=work_dir,
+            )
+            stats_rows = _read_tsv(stats)
+            bed_lines = query_bed.read_text(encoding="utf-8").splitlines()
+            summary_rows = _read_tsv(summary)
+            histogram_text = alignment_histogram.read_text(encoding="utf-8")
+            density_text = overlap_density.read_text(encoding="utf-8")
+
+        self.assertEqual(result.chain_count, 3)
+        self.assertEqual(result.candidate_count, 3)
+        self.assertEqual(result.stats_count, 3)
+        self.assertEqual(result.query_bed_count, 2)
+        self.assertEqual(result.summary_count, 2)
+        self.assertEqual(result.plot_result.histogram_n, 2)
+        self.assertEqual(result.plot_result.density_n, 2)
+        self.assertEqual(len(stats_rows), 3)
+        self.assertEqual(len(summary_rows), 2)
+        self.assertIn("<svg", histogram_text)
+        self.assertIn("Query alignments per reference CNEE", histogram_text)
+        self.assertIn("<svg", density_text)
+        self.assertIn("Overlap fraction density", density_text)
+        self.assertEqual(
+            bed_lines,
+            [
+                "chrQ2\t770\t890\tCNEE_PARTIAL#2\t200\t-\t770\t890\t0\t1\t120,\t0,",
+                "chrQ\t520\t590\tCNEE_PARTIAL#1\t100\t+\t520\t590\t0\t1\t70,\t0,",
+            ],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

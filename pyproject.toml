@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toga4cnee"
+version = "0.1.0"
+description = "TOGA-like projection workflow components for conserved nonexonic elements"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "TOGA4CNEE developers" }]
+dependencies = []
+
+[project.scripts]
+toga4cnee = "toga4cnee.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
