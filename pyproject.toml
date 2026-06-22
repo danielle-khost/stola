@@ -9,7 +9,7 @@ description = "TOGA-like projection workflow components for conserved nonexonic 
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "TOGA4CNEE developers" }]
-dependencies = []
+dependencies = ["biopython>=1.87"]
 
 [project.scripts]
 toga4cnee = "toga4cnee.cli:main"

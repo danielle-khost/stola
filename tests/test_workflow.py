@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from toga4cnee.candidates import write_candidates
 from toga4cnee.index import build_index, load_index
 from toga4cnee.overlap import calculate_overlap_rows, write_overlap_stats
+from toga4cnee.sequence_compare import SequenceComparator
 from toga4cnee.summary import summarize_overlap_stats
 from toga4cnee.workflow import run_workflow
 
@@ -224,6 +225,7 @@ class WorkflowTests(unittest.TestCase):
             summary = tmp_path / "summary.tsv"
             alignment_histogram = tmp_path / "alignment_hist.svg"
             overlap_density = tmp_path / "overlap_density.svg"
+            sequence_identity_density = tmp_path / "sequence_identity_density.svg"
             work_dir = tmp_path / "work"
 
             result = run_workflow(
@@ -234,6 +236,7 @@ class WorkflowTests(unittest.TestCase):
                 out_summary=summary,
                 out_alignment_histogram=alignment_histogram,
                 out_overlap_density=overlap_density,
+                out_sequence_identity_density=sequence_identity_density,
                 flank_size=25,
                 work_dir=work_dir,
             )
@@ -242,6 +245,7 @@ class WorkflowTests(unittest.TestCase):
             summary_rows = _read_tsv(summary)
             histogram_text = alignment_histogram.read_text(encoding="utf-8")
             density_text = overlap_density.read_text(encoding="utf-8")
+            seq_density_text = sequence_identity_density.read_text(encoding="utf-8")
 
         self.assertEqual(result.chain_count, 3)
         self.assertEqual(result.candidate_count, 3)
@@ -249,13 +253,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.query_bed_count, 2)
         self.assertEqual(result.summary_count, 2)
         self.assertEqual(result.plot_result.histogram_n, 2)
-        self.assertEqual(result.plot_result.density_n, 2)
+        self.assertEqual(result.plot_result.overlap_density_n, 2)
+        self.assertEqual(result.plot_result.sequence_identity_density_n, 0)
         self.assertEqual(len(stats_rows), 3)
         self.assertEqual(len(summary_rows), 2)
         self.assertIn("<svg", histogram_text)
         self.assertIn("Query alignments per reference CNEE", histogram_text)
         self.assertIn("<svg", density_text)
         self.assertIn("Overlap fraction density", density_text)
+        self.assertIn("<svg", seq_density_text)
+        self.assertIn("Sequence identity density", seq_density_text)
         self.assertEqual(
             bed_lines,
             [
@@ -263,6 +270,76 @@ class WorkflowTests(unittest.TestCase):
                 "chrQ\t520\t590\tCNEE_PARTIAL#1\t100\t+\t520\t590\t0\t1\t70,\t0,",
             ],
         )
+
+    def test_sequence_comparison_metrics_for_plus_strand_projection(self) -> None:
+        try:
+            import Bio  # noqa: F401
+        except ImportError:
+            self.skipTest("Biopython is not installed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            ref_fasta = tmp_path / "ref.fa"
+            query_fasta = tmp_path / "query.fa"
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            ref_fasta.write_text(
+                ">chr1.1\n" + ("N" * 120) + ("A" * 120) + ("N" * 100) + "\n"
+                ">chr2\n" + ("C" * 400) + "\n",
+                encoding="utf-8",
+            )
+            query_fasta.write_text(
+                ">chrQ.1\n"
+                + ("N" * 520)
+                + ("A" * 30)
+                + ("G" * 40)
+                + ("N" * 500)
+                + "\n"
+                ">chrQ2\n"
+                + ("N" * 770)
+                + ("T" * 120)
+                + ("N" * 200)
+                + "\n"
+                ">chrQ3\n"
+                + ("N" * 1000)
+                + "\n",
+                encoding="utf-8",
+            )
+            build_index(chain, index)
+            write_candidates(index, bed, candidates)
+            comparator = SequenceComparator(ref_fasta, query_fasta, tmp_path)
+            try:
+                from toga4cnee.overlap import iter_overlap_rows
+
+                seq_rows = list(
+                    iter_overlap_rows(
+                        index,
+                        candidates,
+                        flank_size=25,
+                        sequence_comparator=comparator,
+                    )
+                )
+            finally:
+                comparator.close()
+
+        by_pair = {(row["cnee_id"], row["chain_id"]): row for row in seq_rows}
+        plus = by_pair[("CNEE_PARTIAL", "1")]
+        self.assertEqual(plus["seq_ref_len"], 120)
+        self.assertEqual(plus["seq_query_len"], 70)
+        self.assertEqual(plus["seq_compared_bases"], 70)
+        self.assertEqual(plus["seq_matches"], 30)
+        self.assertEqual(plus["seq_mismatches"], 40)
+        self.assertAlmostEqual(float(plus["seq_identity"]), 30 / 70)
+
+        minus = by_pair[("CNEE_PARTIAL", "2")]
+        self.assertEqual(minus["seq_compared_bases"], 120)
+        self.assertEqual(minus["seq_matches"], 120)
+        self.assertEqual(minus["seq_mismatches"], 0)
+        self.assertEqual(minus["seq_identity"], 1.0)
+
+        gapped = by_pair[("CNEE_GAPPED", "3")]
+        self.assertEqual(gapped["seq_compared_bases"], 0)
+        self.assertEqual(gapped["seq_identity"], ".")
 
 
 if __name__ == "__main__":

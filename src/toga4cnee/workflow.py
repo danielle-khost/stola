@@ -12,6 +12,7 @@ from .index import build_index
 from .overlap import OVERLAP_COLUMNS, iter_overlap_rows
 from .plots import PlotResult, write_qc_plots
 from .query_bed import row_to_bed12
+from .sequence_compare import SequenceComparator
 from .summary import summarize_overlap_stats
 
 
@@ -35,12 +36,17 @@ def run_workflow(
     out_summary: str | Path | None = None,
     out_alignment_histogram: str | Path | None = None,
     out_overlap_density: str | Path | None = None,
+    out_sequence_identity_density: str | Path | None = None,
+    ref_fasta: str | Path | None = None,
+    query_fasta: str | Path | None = None,
     flank_size: int = 1000,
     work_dir: str | Path | None = None,
 ) -> WorkflowResult:
     """Run indexing, candidate discovery, overlap stats, and query BED export."""
     if flank_size < 0:
         raise ValueError("flank_size must be non-negative")
+    if (ref_fasta is None) != (query_fasta is None):
+        raise ValueError("--ref-fasta and --query-fasta must be supplied together")
 
     out_bed = Path(out_bed)
     out_stats = Path(out_stats)
@@ -57,11 +63,17 @@ def run_workflow(
         if out_overlap_density is not None
         else out_stats.with_suffix(".overlap_fraction_density.svg")
     )
+    out_sequence_identity_density_path = (
+        Path(out_sequence_identity_density)
+        if out_sequence_identity_density is not None
+        else out_stats.with_suffix(".sequence_identity_density.svg")
+    )
     out_bed.parent.mkdir(parents=True, exist_ok=True)
     out_stats.parent.mkdir(parents=True, exist_ok=True)
     out_summary_path.parent.mkdir(parents=True, exist_ok=True)
     out_alignment_histogram_path.parent.mkdir(parents=True, exist_ok=True)
     out_overlap_density_path.parent.mkdir(parents=True, exist_ok=True)
+    out_sequence_identity_density_path.parent.mkdir(parents=True, exist_ok=True)
 
     if work_dir is None:
         with tempfile.TemporaryDirectory(prefix="toga4cnee_") as tmpdir:
@@ -73,6 +85,9 @@ def run_workflow(
                 out_summary_path,
                 out_alignment_histogram_path,
                 out_overlap_density_path,
+                out_sequence_identity_density_path,
+                ref_fasta,
+                query_fasta,
                 flank_size,
                 Path(tmpdir),
             )
@@ -87,6 +102,9 @@ def run_workflow(
         out_summary_path,
         out_alignment_histogram_path,
         out_overlap_density_path,
+        out_sequence_identity_density_path,
+        ref_fasta,
+        query_fasta,
         flank_size,
         work_path,
     )
@@ -100,6 +118,9 @@ def _run_workflow_in_dir(
     out_summary: Path,
     out_alignment_histogram: Path,
     out_overlap_density: Path,
+    out_sequence_identity_density: Path,
+    ref_fasta: str | Path | None,
+    query_fasta: str | Path | None,
     flank_size: int,
     work_dir: Path,
 ) -> WorkflowResult:
@@ -108,12 +129,30 @@ def _run_workflow_in_dir(
 
     index_payload = build_index(chain_file, index_path)
     candidate_count = write_candidates(index_path, cnee_bed, candidates_path)
-    stats_count, query_bed_count = _write_outputs(
-        index_path, candidates_path, out_stats, out_bed, flank_size
+    sequence_comparator = (
+        SequenceComparator(ref_fasta, query_fasta, work_dir)
+        if ref_fasta is not None and query_fasta is not None
+        else None
     )
+    try:
+        stats_count, query_bed_count = _write_outputs(
+            index_path,
+            candidates_path,
+            out_stats,
+            out_bed,
+            flank_size,
+            sequence_comparator=sequence_comparator,
+        )
+    finally:
+        if sequence_comparator is not None:
+            sequence_comparator.close()
     summary_count = summarize_overlap_stats(out_stats, out_summary, cnee_bed=cnee_bed)
     plot_result = write_qc_plots(
-        out_summary, out_stats, out_alignment_histogram, out_overlap_density
+        out_summary,
+        out_stats,
+        out_alignment_histogram,
+        out_overlap_density,
+        out_sequence_identity_density,
     )
 
     return WorkflowResult(
@@ -134,10 +173,16 @@ def _write_outputs(
     out_stats: Path,
     out_bed: Path,
     flank_size: int,
+    sequence_comparator: SequenceComparator | None = None,
 ) -> tuple[int, int]:
     stats_count = 0
     query_bed_count = 0
-    rows = iter_overlap_rows(index_path, candidates_path, flank_size=flank_size)
+    rows = iter_overlap_rows(
+        index_path,
+        candidates_path,
+        flank_size=flank_size,
+        sequence_comparator=sequence_comparator,
+    )
     with out_stats.open("w", encoding="utf-8", newline="") as stats_handle:
         writer = csv.DictWriter(stats_handle, fieldnames=OVERLAP_COLUMNS, delimiter="\t")
         writer.writeheader()

@@ -14,6 +14,12 @@ from .candidates import CANDIDATE_COLUMNS
 from .index import load_index
 from .intervals import fraction, overlap_length
 from .models import ChainBlock, ChainRecord
+from .sequence_compare import (
+    MISSING_SEQUENCE_METRICS,
+    SEQUENCE_COLUMNS,
+    SequenceComparator,
+    aligned_segments_for_interval,
+)
 
 OVERLAP_COLUMNS = CANDIDATE_COLUMNS + [
     "query_projection_name",
@@ -35,7 +41,7 @@ OVERLAP_COLUMNS = CANDIDATE_COLUMNS + [
     "right_flank_covered_fraction",
     "num_candidate_chains_for_cnee",
     "rank_by_chain_score",
-]
+] + SEQUENCE_COLUMNS
 
 
 @dataclass(frozen=True)
@@ -160,6 +166,7 @@ def iter_overlap_rows(
     index_path: str | Path,
     candidate_path: str | Path,
     flank_size: int = 1000,
+    sequence_comparator: SequenceComparator | None = None,
 ) -> Iterator[dict[str, str | int | float]]:
     if flank_size < 0:
         raise ValueError("flank_size must be non-negative")
@@ -187,13 +194,29 @@ def iter_overlap_rows(
             ref_end = int(candidate["ref_end"])
             cnee_len = ref_end - ref_start
             span_overlap = int(candidate["span_overlap_bases"])
+            overlapping_blocks = list(blocks.overlapping(ref_start, ref_end))
+            cnee_block_index = BlockIndex.from_blocks(overlapping_blocks)
             aligned, query_start, query_end, query_segments = _aligned_bases(
-                blocks, ref_start, ref_end, record.query_strand
+                cnee_block_index, ref_start, ref_end, record.query_strand
             )
             gap_bases = max(0, span_overlap - aligned)
             query_block_count, query_block_sizes, query_block_starts = _block_fields(
                 query_start, query_segments
             )
+            sequence_metrics: dict[str, str | int | float]
+            if sequence_comparator is None:
+                sequence_metrics = dict(MISSING_SEQUENCE_METRICS)
+            else:
+                sequence_metrics = sequence_comparator.compare(
+                    str(candidate["ref_chrom"]),
+                    ref_start,
+                    ref_end,
+                    record.query_chrom,
+                    record.query_strand,
+                    aligned_segments_for_interval(
+                        overlapping_blocks, ref_start, ref_end, record.query_strand
+                    ),
+                )
 
             left_start = max(0, ref_start - flank_size)
             left_end = ref_start
@@ -229,6 +252,7 @@ def iter_overlap_rows(
                         candidate["cnee_uid"]
                     ],
                     "rank_by_chain_score": ranks[(candidate["cnee_uid"], chain_id)],
+                    **sequence_metrics,
                 }
             )
             yield output_row

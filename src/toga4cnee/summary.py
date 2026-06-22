@@ -14,6 +14,8 @@ SUMMARY_COLUMNS = [
     "num_query_alignments",
     "overlap_fractions",
     "gap_bases",
+    "sequence_identities",
+    "sequence_mismatches",
 ]
 
 
@@ -22,6 +24,8 @@ class CneeSummary:
     cnee_id: str
     overlap_fractions: list[str] = field(default_factory=list)
     gap_bases: list[str] = field(default_factory=list)
+    sequence_identities: list[str] = field(default_factory=list)
+    sequence_mismatches: list[str] = field(default_factory=list)
 
     @property
     def num_query_alignments(self) -> int:
@@ -33,6 +37,8 @@ class CneeSummary:
             "num_query_alignments": self.num_query_alignments,
             "overlap_fractions": ",".join(self.overlap_fractions),
             "gap_bases": ",".join(self.gap_bases),
+            "sequence_identities": ",".join(self.sequence_identities),
+            "sequence_mismatches": ",".join(self.sequence_mismatches),
         }
 
 
@@ -71,6 +77,11 @@ def summarize_overlap_stats(
             summary = summaries.setdefault(cnee_id, CneeSummary(cnee_id=cnee_id))
             summary.overlap_fractions.append(row["covered_fraction"])
             summary.gap_bases.append(row["gap_bases_within_chain_span"])
+            seq_identity = row.get("seq_identity", ".")
+            if seq_identity != ".":
+                summary.sequence_identities.append(seq_identity)
+            if "seq_mismatches" in row and seq_identity != ".":
+                summary.sequence_mismatches.append(row["seq_mismatches"])
 
     with Path(out_path).open("w", encoding="utf-8", newline="") as out_handle:
         writer = csv.DictWriter(out_handle, fieldnames=SUMMARY_COLUMNS, delimiter="\t")

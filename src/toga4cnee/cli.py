@@ -27,6 +27,11 @@ def _run(args: argparse.Namespace) -> None:
         if args.out_overlap_density is not None
         else args.out_stats.with_suffix(".overlap_fraction_density.svg")
     )
+    out_sequence_identity_density = (
+        args.out_sequence_identity_density
+        if args.out_sequence_identity_density is not None
+        else args.out_stats.with_suffix(".sequence_identity_density.svg")
+    )
     result = run_workflow(
         args.chain_file,
         args.cnee_bed,
@@ -35,6 +40,9 @@ def _run(args: argparse.Namespace) -> None:
         out_summary=out_summary,
         out_alignment_histogram=out_alignment_histogram,
         out_overlap_density=out_overlap_density,
+        out_sequence_identity_density=out_sequence_identity_density,
+        ref_fasta=args.ref_fasta,
+        query_fasta=args.query_fasta,
         flank_size=args.flank_size,
         work_dir=args.work_dir,
     )
@@ -44,6 +52,7 @@ def _run(args: argparse.Namespace) -> None:
     print(f"Wrote {result.summary_count} CNEE summary rows -> {out_summary}")
     print(f"Wrote alignment histogram -> {out_alignment_histogram}")
     print(f"Wrote overlap density plot -> {out_overlap_density}")
+    print(f"Wrote sequence identity density plot -> {out_sequence_identity_density}")
     if args.work_dir is not None:
         print(f"Kept intermediates in {args.work_dir}")
 
@@ -64,11 +73,18 @@ def _plot(args: argparse.Namespace) -> None:
         args.overlap_stats_tsv,
         args.out_alignment_histogram,
         args.out_overlap_density,
+        args.out_sequence_identity_density,
     )
     print(f"Wrote alignment histogram for {result.histogram_n} CNEEs -> {result.histogram_path}")
     print(
         "Wrote overlap density for "
-        f"{result.density_n} aligned candidate projections -> {result.density_path}"
+        f"{result.overlap_density_n} aligned candidate projections -> "
+        f"{result.overlap_density_path}"
+    )
+    print(
+        "Wrote sequence identity density for "
+        f"{result.sequence_identity_density_n} sequence-compared projections -> "
+        f"{result.sequence_identity_density_path}"
     )
 
 
@@ -111,7 +127,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="SVG density plot of overlap fractions [default: OUT_STATS with .overlap_fraction_density.svg suffix]",
     )
+    run_parser.add_argument(
+        "--out-sequence-identity-density",
+        type=Path,
+        default=None,
+        help="SVG density plot of sequence identity [default: OUT_STATS with .sequence_identity_density.svg suffix]",
+    )
     run_parser.add_argument("--flank-size", type=int, default=1000)
+    run_parser.add_argument(
+        "--ref-fasta",
+        type=Path,
+        default=None,
+        help="Reference genome FASTA for sequence identity/mismatch metrics",
+    )
+    run_parser.add_argument(
+        "--query-fasta",
+        type=Path,
+        default=None,
+        help="Query genome FASTA for sequence identity/mismatch metrics",
+    )
     run_parser.add_argument(
         "--work-dir",
         type=Path,
@@ -150,6 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     plot_parser.add_argument("overlap_stats_tsv", type=Path)
     plot_parser.add_argument("--out-alignment-histogram", required=True, type=Path)
     plot_parser.add_argument("--out-overlap-density", required=True, type=Path)
+    plot_parser.add_argument("--out-sequence-identity-density", required=True, type=Path)
     plot_parser.set_defaults(func=_plot)
 
     return parser

@@ -9,3 +9,7 @@ dist/
 *.chain
 *.chain.gz
 *.bed
+*.fna
+*.fasta
+*.fa
+*.fai

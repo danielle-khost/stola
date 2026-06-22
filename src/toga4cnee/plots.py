@@ -11,24 +11,32 @@ from pathlib import Path
 @dataclass(frozen=True)
 class PlotResult:
     histogram_path: Path
-    density_path: Path
+    overlap_density_path: Path
+    sequence_identity_density_path: Path
     histogram_n: int
-    density_n: int
+    overlap_density_n: int
+    sequence_identity_density_n: int
 
 
 def write_qc_plots(
     summary_path: str | Path,
     stats_path: str | Path,
     histogram_path: str | Path,
-    density_path: str | Path,
+    overlap_density_path: str | Path,
+    sequence_identity_density_path: str | Path,
 ) -> PlotResult:
     histogram_n = write_alignment_histogram(summary_path, histogram_path)
-    density_n = write_overlap_density(stats_path, density_path)
+    overlap_density_n = write_overlap_density(stats_path, overlap_density_path)
+    sequence_identity_density_n = write_sequence_identity_density(
+        stats_path, sequence_identity_density_path
+    )
     return PlotResult(
         histogram_path=Path(histogram_path),
-        density_path=Path(density_path),
+        overlap_density_path=Path(overlap_density_path),
+        sequence_identity_density_path=Path(sequence_identity_density_path),
         histogram_n=histogram_n,
-        density_n=density_n,
+        overlap_density_n=overlap_density_n,
+        sequence_identity_density_n=sequence_identity_density_n,
     )
 
 
@@ -84,6 +92,39 @@ def write_overlap_density(
         title="Overlap fraction density",
         subtitle=f"Aligned candidate projections: {total}",
         x_label="CNEE overlap fraction",
+        y_label="Density",
+        values=smoothed,
+    )
+    Path(out_path).write_text(svg, encoding="utf-8")
+    return total
+
+
+def write_sequence_identity_density(
+    stats_path: str | Path, out_path: str | Path, bins: int = 100
+) -> int:
+    counts = [0 for _ in range(bins)]
+    total = 0
+    with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if "seq_identity" not in (reader.fieldnames or []):
+            total = 0
+        else:
+            for row in reader:
+                value_text = row["seq_identity"]
+                if value_text == ".":
+                    continue
+                value = min(1.0, max(0.0, float(value_text)))
+                index = min(bins - 1, int(value * bins))
+                counts[index] += 1
+                total += 1
+
+    bin_width = 1.0 / bins
+    densities = [count / (total * bin_width) if total else 0.0 for count in counts]
+    smoothed = _moving_average(densities, radius=2)
+    svg = _density_svg(
+        title="Sequence identity density",
+        subtitle=f"Sequence-compared projections: {total}",
+        x_label="Sequence identity",
         y_label="Density",
         values=smoothed,
     )
