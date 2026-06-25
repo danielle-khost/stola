@@ -14,13 +14,22 @@ toga4cnee alignment.chain.gz reference_cnees.bed \
 ```
 
 The command indexes the chain file, finds candidate chain/CNEE pairs, computes
-overlap statistics for every candidate, writes BED12 query projections for
-candidate pairs with aligned CNEE bases, writes a concise summary at
-`overlap_stats.summary.tsv`, and writes two SVG QC plots by default:
-`overlap_stats.num_query_alignments.svg` and
-`overlap_stats.overlap_fraction_density.svg`. When sequence metrics are present,
-the workflow also writes `overlap_stats.sequence_identity_density.svg`. Use
-`--work-dir` to keep intermediate index and candidate TSV files.
+overlap statistics for every candidate, clusters overlapping query-side
+projections into graph-assigned query CNEEs, writes those query CNEEs to BED,
+writes graph-based orthology calls at `overlap_stats.orthology.tsv`, writes a
+concise summary at `overlap_stats.summary.tsv`, and writes SVG QC plots by
+default: `overlap_stats.num_query_alignments.svg`,
+`overlap_stats.overlap_fraction_density.svg`, and
+`overlap_stats.sequence_identity_density.svg`. Use `--work-dir` to keep
+intermediate index and candidate TSV files.
+
+The current orthology pass draws an edge for every aligned query projection,
+then classifies connected components as `one2one`, `one2many`, `many2one`,
+`missing`, or the catch-all `complex/many2many`. Filtering logic is intentionally
+deferred so test runs can expose the raw duplication/loss patterns. The
+orthology TSV has three columns: `query_cnee_id`, `partner_ref_cnees`, and
+`orthology_category`; missing reference CNEEs are written as `NA`, the reference
+CNEE ID, and `missing`.
 
 When both `--ref-fasta` and `--query-fasta` are supplied, the stats and summary
 also include direct chain-aligned sequence identity and mismatch counts. These

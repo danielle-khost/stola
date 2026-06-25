@@ -1,5 +1,5 @@
 # GOAL
-For each candidate projection to query, classify it into different orthology relation categories between each reference and query CNEEs
+For each candidate projection to query, give it a query ID and classify it into different orthology relation categories between each reference and query CNEEs
 
 # Filtering criteria
 Overlap fraction, sequence similarity, number of projections for the CNEE
@@ -13,6 +13,7 @@ Overlap fraction, sequence similarity, number of projections for the CNEE
 - "lost/diverged": ref CNEE has ONLY low quality alignment(s) to query; BELOW filtering threshold
 - many2many/"complex": complex cases where multiple ref CNEEs overlap multiple the same query loci
   - i.e. a "combo" of many2one and one2many
+  - question: how deep to recurse into graph...
 
 # Implementation
 - Create network graph where:
@@ -23,11 +24,23 @@ Overlap fraction, sequence similarity, number of projections for the CNEE
     - below threshold, weight = 0.5 (placeholder)
 - for each query node:
   - get connected ref nodes
-    - check if connected ref nodes have edges with other query nodes
-  - use info re: connected nodes to assign orthology category for that query node (i.e CNEE):
-    - if query node has connections (edges) with weight = 1 (i.e. pass the filtering threshold):
-      - if connected to single ref node that has no other connections, then: one2one
+  - use info re: connected nodes to assign orthology category and ID for that query node (i.e CNEE):
+    - if query node has at least 1 connections (edges) with weight = 1 (i.e. pass the filtering threshold):
+      - if connected to single ref node that has no other connections, then: "one2one"
+        - set query ID as "q_[ref CNEE name]"
       - if connected single ref node and:
         - ref node connects multiple query nodes AND those query nodes only connect this reference
-        - then: one2many
-      - if connects to multiple ref nodes and those ref nodes only connect this query node, then: many2one
+        - then: "one2many"
+          - set query ID as "q_[ref DNEE name]_[n]"
+      - if connects to multiple ref nodes and those ref nodes only connect this query node, then: "many2one"
+      - for now, if none of these criteria met, then: "complex"
+    - else if query node only has edge(s) with weight < 1 (i.e. does not pass filtering criteria), then: "diverged/lost"
+- for each reference node with 0 edges:
+  - set query CNEE ID to "NA"
+  - set orthology category as: "missing"
+
+# Output
+Tab separated list:
+- query CNEE w/ ID
+- partner ref CNEE(s) as comma separated list
+- orthology category

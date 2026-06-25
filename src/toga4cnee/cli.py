@@ -32,6 +32,11 @@ def _run(args: argparse.Namespace) -> None:
         if args.out_sequence_identity_density is not None
         else args.out_stats.with_suffix(".sequence_identity_density.svg")
     )
+    out_orthology = (
+        args.out_orthology
+        if args.out_orthology is not None
+        else args.out_stats.with_suffix(".orthology.tsv")
+    )
     result = run_workflow(
         args.chain_file,
         args.cnee_bed,
@@ -41,6 +46,7 @@ def _run(args: argparse.Namespace) -> None:
         out_alignment_histogram=out_alignment_histogram,
         out_overlap_density=out_overlap_density,
         out_sequence_identity_density=out_sequence_identity_density,
+        out_orthology=out_orthology,
         ref_fasta=args.ref_fasta,
         query_fasta=args.query_fasta,
         flank_size=args.flank_size,
@@ -48,7 +54,11 @@ def _run(args: argparse.Namespace) -> None:
     )
     print(f"Indexed {result.chain_count} chains")
     print(f"Wrote {result.stats_count} overlap-stat rows -> {args.out_stats}")
-    print(f"Wrote {result.query_bed_count} query BED12 projections -> {args.out_bed}")
+    print(f"Wrote {result.query_bed_count} query CNEE BED rows -> {args.out_bed}")
+    print(
+        f"Wrote {result.orthology_result.orthology_rows} orthology rows -> "
+        f"{out_orthology}"
+    )
     print(f"Wrote {result.summary_count} CNEE summary rows -> {out_summary}")
     print(f"Wrote alignment histogram -> {out_alignment_histogram}")
     print(f"Wrote overlap density plot -> {out_overlap_density}")
@@ -105,7 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("chain_file", type=Path, help="Input .chain or .chain.gz file")
     run_parser.add_argument("cnee_bed", type=Path, help="Reference CNEE BED3+ file")
-    run_parser.add_argument("--out-bed", required=True, type=Path, help="Output query BED12")
+    run_parser.add_argument(
+        "--out-bed", required=True, type=Path, help="Output graph-assigned query CNEE BED"
+    )
     run_parser.add_argument(
         "--out-stats", required=True, type=Path, help="Output overlap stats TSV"
     )
@@ -132,6 +144,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="SVG density plot of sequence identity [default: OUT_STATS with .sequence_identity_density.svg suffix]",
+    )
+    run_parser.add_argument(
+        "--out-orthology",
+        type=Path,
+        default=None,
+        help="Graph-based orthology classification TSV [default: OUT_STATS with .orthology.tsv suffix]",
     )
     run_parser.add_argument("--flank-size", type=int, default=1000)
     run_parser.add_argument(

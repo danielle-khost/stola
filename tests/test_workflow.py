@@ -15,6 +15,14 @@ from toga4cnee.summary import summarize_overlap_stats
 from toga4cnee.workflow import run_workflow
 
 
+def _has_networkx() -> bool:
+    try:
+        import networkx  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 CHAIN_TEXT = "\n".join(
     [
         "chain 100 chr1 1000 + 100 300 chrQ 1000 + 500 650 1",
@@ -217,12 +225,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(rows[1]["gap_bases"], "")
 
     def test_single_workflow_writes_stats_and_query_bed(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             chain, bed = _write_inputs(tmp_path)
             stats = tmp_path / "overlap_stats.tsv"
             query_bed = tmp_path / "query_cnees.bed"
             summary = tmp_path / "summary.tsv"
+            orthology = tmp_path / "orthology.tsv"
             alignment_histogram = tmp_path / "alignment_hist.svg"
             overlap_density = tmp_path / "overlap_density.svg"
             sequence_identity_density = tmp_path / "sequence_identity_density.svg"
@@ -234,6 +245,7 @@ class WorkflowTests(unittest.TestCase):
                 query_bed,
                 stats,
                 out_summary=summary,
+                out_orthology=orthology,
                 out_alignment_histogram=alignment_histogram,
                 out_overlap_density=overlap_density,
                 out_sequence_identity_density=sequence_identity_density,
@@ -243,6 +255,7 @@ class WorkflowTests(unittest.TestCase):
             stats_rows = _read_tsv(stats)
             bed_lines = query_bed.read_text(encoding="utf-8").splitlines()
             summary_rows = _read_tsv(summary)
+            orthology_rows = _read_tsv(orthology)
             histogram_text = alignment_histogram.read_text(encoding="utf-8")
             density_text = overlap_density.read_text(encoding="utf-8")
             seq_density_text = sequence_identity_density.read_text(encoding="utf-8")
@@ -252,11 +265,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.stats_count, 3)
         self.assertEqual(result.query_bed_count, 2)
         self.assertEqual(result.summary_count, 2)
+        self.assertEqual(result.orthology_result.orthology_rows, 3)
         self.assertEqual(result.plot_result.histogram_n, 2)
         self.assertEqual(result.plot_result.overlap_density_n, 2)
         self.assertEqual(result.plot_result.sequence_identity_density_n, 0)
         self.assertEqual(len(stats_rows), 3)
         self.assertEqual(len(summary_rows), 2)
+        self.assertEqual(len(orthology_rows), 3)
+        self.assertEqual(
+            list(orthology_rows[0]),
+            ["query_cnee_id", "partner_ref_cnees", "orthology_category"],
+        )
         self.assertIn("<svg", histogram_text)
         self.assertIn("Query alignments per reference CNEE", histogram_text)
         self.assertIn("<svg", density_text)
@@ -266,10 +285,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(
             bed_lines,
             [
-                "chrQ2\t770\t890\tCNEE_PARTIAL#2\t200\t-\t770\t890\t0\t1\t120,\t0,",
-                "chrQ\t520\t590\tCNEE_PARTIAL#1\t100\t+\t520\t590\t0\t1\t70,\t0,",
+                "chrQ\t520\t590\tq_CNEE_PARTIAL_1\t0\t+",
+                "chrQ2\t770\t890\tq_CNEE_PARTIAL_2\t0\t-",
             ],
         )
+        categories = {
+            row["query_cnee_id"]: row["orthology_category"] for row in orthology_rows
+        }
+        self.assertEqual(categories["q_CNEE_PARTIAL_1"], "one2many")
+        self.assertEqual(categories["q_CNEE_PARTIAL_2"], "one2many")
+        self.assertEqual(categories["NA"], "missing")
+        missing_row = next(row for row in orthology_rows if row["query_cnee_id"] == "NA")
+        self.assertEqual(missing_row["partner_ref_cnees"], "CNEE_GAPPED")
+        self.assertEqual(missing_row["orthology_category"], "missing")
 
     def test_sequence_comparison_metrics_for_plus_strand_projection(self) -> None:
         try:
