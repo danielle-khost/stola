@@ -27,6 +27,12 @@ class Projection:
     projection_name: str
 
 
+@dataclass(frozen=True)
+class ProjectionEvidence:
+    projections: list[Projection]
+    refs_with_candidates: set[str]
+
+
 @dataclass
 class QueryCluster:
     node_id: str
@@ -41,6 +47,7 @@ class QueryCluster:
 
     @property
     def strand(self) -> str:
+        # Return a single cluster strand, or "." when merged projections disagree.
         return next(iter(self.strands)) if len(self.strands) == 1 else "."
 
 
@@ -57,6 +64,7 @@ def classify_orthology(
     out_query_bed: str | Path,
 ) -> OrthologyResult:
     """Classify query CNEE loci from overlap stats and write TSV/BED outputs."""
+    # Build a ref/query graph from aligned projections and write orthology calls.
     try:
         import networkx as nx
     except ImportError as exc:
@@ -66,7 +74,8 @@ def classify_orthology(
         ) from exc
 
     ref_ids = [interval.cnee_id for interval in parse_bed(cnee_bed)]
-    projections = _read_aligned_projections(stats_path)
+    evidence = _read_projection_evidence(stats_path)
+    projections = evidence.projections
     clusters = _cluster_query_projections(projections)
 
     graph = nx.Graph()
@@ -79,13 +88,17 @@ def classify_orthology(
 
     components = [set(component) for component in nx.connected_components(graph)]
     _assign_orthology_categories(components, clusters)
-    orthology_count = _write_orthology_tsv(graph, clusters, ref_ids, out_orthology)
+    orthology_count = _write_orthology_tsv(
+        graph, clusters, ref_ids, evidence.refs_with_candidates, out_orthology
+    )
     bed_count = _write_query_bed(clusters, out_query_bed)
     return OrthologyResult(orthology_rows=orthology_count, query_bed_rows=bed_count)
 
 
-def _read_aligned_projections(stats_path: str | Path) -> list[Projection]:
+def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
+    # Read candidate evidence and aligned query coordinates usable as graph edges.
     projections: list[Projection] = []
+    refs_with_candidates: set[str] = set()
     with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         required = {
@@ -101,6 +114,7 @@ def _read_aligned_projections(stats_path: str | Path) -> list[Projection]:
         if missing:
             raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
         for row in reader:
+            refs_with_candidates.add(row["cnee_id"])
             if int(row["aligned_bases"]) <= 0:
                 continue
             if row["query_aligned_start"] == "." or row["query_aligned_end"] == ".":
@@ -115,10 +129,14 @@ def _read_aligned_projections(stats_path: str | Path) -> list[Projection]:
                     projection_name=row["query_projection_name"],
                 )
             )
-    return projections
+    return ProjectionEvidence(
+        projections=projections,
+        refs_with_candidates=refs_with_candidates,
+    )
 
 
 def _cluster_query_projections(projections: list[Projection]) -> list[QueryCluster]:
+    # Merge overlapping query-side projections into provisional query CNEE loci.
     by_chrom: dict[str, list[Projection]] = defaultdict(list)
     for projection in projections:
         by_chrom[projection.query_chrom].append(projection)
@@ -151,6 +169,7 @@ def _cluster_query_projections(projections: list[Projection]) -> list[QueryClust
 def _assign_orthology_categories(
     components: list[set[str]], clusters: list[QueryCluster]
 ) -> None:
+    # Assign query IDs and broad orthology categories from graph components.
     cluster_by_node = {cluster.node_id: cluster for cluster in clusters}
     component_counter = 0
     for component in sorted(
@@ -194,8 +213,10 @@ def _write_orthology_tsv(
     graph,
     clusters: list[QueryCluster],
     ref_ids: list[str],
+    refs_with_candidates: set[str],
     out_path: str | Path,
 ) -> int:
+    # Write compact query/ref/category rows, including lost/missing references.
     count = 0
 
     with Path(out_path).open("w", encoding="utf-8", newline="") as handle:
@@ -230,11 +251,12 @@ def _write_orthology_tsv(
         for ref_id in ref_ids:
             if ref_id in ref_with_query:
                 continue
+            category = "lost" if ref_id in refs_with_candidates else "missing"
             writer.writerow(
                 {
                     "query_cnee_id": "NA",
                     "partner_ref_cnees": ref_id,
-                    "orthology_category": "missing",
+                    "orthology_category": category,
                 }
             )
             count += 1
@@ -242,6 +264,7 @@ def _write_orthology_tsv(
 
 
 def _write_query_bed(clusters: list[QueryCluster], out_path: str | Path) -> int:
+    # Write graph-assigned query CNEE loci as BED6 rows.
     count = 0
     with Path(out_path).open("w", encoding="utf-8") as handle:
         for cluster in sorted(clusters, key=lambda item: (item.chrom, item.start, item.end)):
@@ -265,6 +288,7 @@ def _write_query_bed(clusters: list[QueryCluster], out_path: str | Path) -> int:
 def _sort_query_nodes_by_coordinates(
     query_nodes: list[str], cluster_by_node: dict[str, QueryCluster]
 ) -> list[str]:
+    # Order query graph nodes by genomic coordinates for stable ID assignment.
     return sorted(
         query_nodes,
         key=lambda node: (
@@ -276,12 +300,15 @@ def _sort_query_nodes_by_coordinates(
 
 
 def _ref_node(ref_id: str) -> str:
+    # Build the graph node name used for a reference CNEE.
     return f"ref:{ref_id}"
 
 
 def _node_ref_id(node: str) -> str:
+    # Recover the original reference CNEE ID from a graph node name.
     return node.split(":", 1)[1]
 
 
 def _clean_id(value: str) -> str:
+    # Make a reference ID safe to embed in generated query CNEE IDs.
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)

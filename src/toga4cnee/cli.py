@@ -12,6 +12,7 @@ from .workflow import run_workflow
 
 
 def _run(args: argparse.Namespace) -> None:
+    # Resolve default output paths and launch the full one-command workflow.
     out_summary = (
         args.out_summary
         if args.out_summary is not None
@@ -68,6 +69,7 @@ def _run(args: argparse.Namespace) -> None:
 
 
 def _summarize(args: argparse.Namespace) -> None:
+    # Rebuild only the compact per-reference-CNEE summary from existing stats.
     count = summarize_overlap_stats(
         args.overlap_stats_tsv,
         args.out,
@@ -78,6 +80,7 @@ def _summarize(args: argparse.Namespace) -> None:
 
 
 def _plot(args: argparse.Namespace) -> None:
+    # Rebuild only the SVG QC plots from existing summary and stats files.
     result = write_qc_plots(
         args.summary_tsv,
         args.overlap_stats_tsv,
@@ -99,6 +102,7 @@ def _plot(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # Define the run, summarize, and plot command-line interfaces.
     parser = argparse.ArgumentParser(
         prog="toga4cnee",
         description=(
@@ -209,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # Parse CLI arguments, supporting bare run arguments as shorthand for run.
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] not in {"run", "summarize", "plot", "-h", "--help"}:

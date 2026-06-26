@@ -8,6 +8,7 @@ from .models import ChainBlock, ChainRecord
 
 
 def _normalize_start_end(size: int, strand: str, start: int, end: int) -> tuple[int, int]:
+    # Convert strand-relative chain coordinates into plus-strand coordinates.
     if strand == "+":
         return start, end
     if strand == "-":
@@ -16,6 +17,7 @@ def _normalize_start_end(size: int, strand: str, start: int, end: int) -> tuple[
 
 
 def parse_chain_header(header_line: str, start_byte: int = 0, byte_length: int = 0) -> ChainRecord:
+    # Parse one UCSC chain header and attach byte-offset extraction metadata.
     fields = header_line.rstrip("\n").split()
     if len(fields) != 13 or fields[0] != "chain":
         raise ValueError(f"Invalid chain header: {header_line.rstrip()}")
@@ -58,6 +60,7 @@ def parse_chain_header(header_line: str, start_byte: int = 0, byte_length: int =
 
 
 def extract_chain_text(chain_path: str | Path, record: ChainRecord) -> str:
+    # Read one complete chain from the indexed plain chain file by byte offset.
     with Path(chain_path).open("rb") as handle:
         handle.seek(record.start_byte)
         return handle.read(record.byte_length).decode("utf-8")
@@ -65,6 +68,7 @@ def extract_chain_text(chain_path: str | Path, record: ChainRecord) -> str:
 
 def iter_chain_blocks(chain_text: str) -> list[ChainBlock]:
     """Return aligned blocks from a single chain as plus-coordinate intervals."""
+    # Walk the chain body rows and emit aligned reference/query block intervals.
     lines = [line for line in chain_text.splitlines() if line]
     if not lines:
         raise ValueError("Cannot parse an empty chain")

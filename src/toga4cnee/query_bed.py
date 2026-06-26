@@ -7,6 +7,7 @@ from typing import Iterable
 
 
 def _bed_score(chain_score: object) -> int:
+    # Clamp a chain score into the BED score range.
     try:
         score = int(chain_score)
     except (TypeError, ValueError):
@@ -16,6 +17,7 @@ def _bed_score(chain_score: object) -> int:
 
 def row_to_bed12(row: dict[str, object]) -> str | None:
     """Convert an overlap-stats row into a query-side BED12 projection."""
+    # Convert one aligned overlap-stat row into a legacy per-projection BED12 row.
     if int(row["aligned_bases"]) <= 0:
         return None
     query_start = row["query_aligned_start"]
@@ -44,6 +46,7 @@ def row_to_bed12(row: dict[str, object]) -> str | None:
 
 
 def write_query_bed(rows: Iterable[dict[str, object]], out_path: str | Path) -> int:
+    # Write legacy BED12 rows for aligned overlap-stat projections.
     count = 0
     with Path(out_path).open("w", encoding="utf-8") as handle:
         for row in rows:

@@ -14,6 +14,7 @@ def parse_bed(path: str | Path) -> list[BedInterval]:
     Column 4 is used as the display CNEE ID when present. Otherwise, a stable
     coordinate-based ID is synthesized. The cnee_uid is unique within the file.
     """
+    # Load BED rows into stable CNEE interval objects used across the workflow.
     intervals: list[BedInterval] = []
     seen_ids: defaultdict[str, int] = defaultdict(int)
     with Path(path).open("r", encoding="utf-8") as handle:
@@ -52,6 +53,7 @@ def parse_bed(path: str | Path) -> list[BedInterval]:
 
 
 def group_bed_by_chrom(intervals: list[BedInterval]) -> dict[str, list[BedInterval]]:
+    # Group and sort CNEEs by reference chromosome for interval scanning.
     grouped: dict[str, list[BedInterval]] = defaultdict(list)
     for interval in intervals:
         grouped[interval.chrom].append(interval)

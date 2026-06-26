@@ -25,6 +25,7 @@ def write_qc_plots(
     overlap_density_path: str | Path,
     sequence_identity_density_path: str | Path,
 ) -> PlotResult:
+    # Write the standard trio of SVG QC plots for a completed workflow run.
     histogram_n = write_alignment_histogram(summary_path, histogram_path)
     overlap_density_n = write_overlap_density(stats_path, overlap_density_path)
     sequence_identity_density_n = write_sequence_identity_density(
@@ -41,6 +42,7 @@ def write_qc_plots(
 
 
 def write_alignment_histogram(summary_path: str | Path, out_path: str | Path) -> int:
+    # Plot the distribution of query-alignment counts per reference CNEE.
     labels = [str(i) for i in range(11)] + [">10"]
     counts = [0 for _ in labels]
     total = 0
@@ -68,6 +70,7 @@ def write_alignment_histogram(summary_path: str | Path, out_path: str | Path) ->
 def write_overlap_density(
     stats_path: str | Path, out_path: str | Path, bins: int = 100
 ) -> int:
+    # Plot a smoothed density of aligned projection overlap fractions.
     counts = [0 for _ in range(bins)]
     total = 0
     with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
@@ -102,6 +105,7 @@ def write_overlap_density(
 def write_sequence_identity_density(
     stats_path: str | Path, out_path: str | Path, bins: int = 100
 ) -> int:
+    # Plot a smoothed density of sequence identities when sequence metrics exist.
     counts = [0 for _ in range(bins)]
     total = 0
     with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
@@ -133,6 +137,7 @@ def write_sequence_identity_density(
 
 
 def _moving_average(values: list[float], radius: int) -> list[float]:
+    # Smooth binned densities with a centered moving average.
     if not values:
         return []
     output = []
@@ -144,12 +149,14 @@ def _moving_average(values: list[float], radius: int) -> list[float]:
 
 
 def _scale_y(value: float, max_value: float, plot_top: float, plot_height: float) -> float:
+    # Convert a data value into an SVG y coordinate within the plot area.
     if max_value <= 0:
         return plot_top + plot_height
     return plot_top + plot_height - (value / max_value) * plot_height
 
 
 def _svg_header(width: int, height: int) -> str:
+    # Create the common SVG shell and inline styles for QC plots.
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}">\n'
@@ -173,6 +180,7 @@ def _bar_svg(
     labels: list[str],
     counts: list[int],
 ) -> str:
+    # Render a labeled bar chart as a standalone SVG string.
     width, height = 900, 520
     left, right, top, bottom = 80, 35, 75, 80
     plot_width = width - left - right
@@ -236,6 +244,7 @@ def _density_svg(
     y_label: str,
     values: list[float],
 ) -> str:
+    # Render a smoothed density curve as a standalone SVG string.
     width, height = 900, 520
     left, right, top, bottom = 80, 35, 75, 80
     plot_width = width - left - right

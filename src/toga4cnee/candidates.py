@@ -32,6 +32,7 @@ CANDIDATE_COLUMNS = [
 def _group_chains_by_ref_chrom(
     records: list[ChainRecord],
 ) -> dict[str, list[ChainRecord]]:
+    # Group chain spans by target/reference chromosome for efficient scanning.
     grouped: defaultdict[str, list[ChainRecord]] = defaultdict(list)
     for record in records:
         grouped[record.ref_chrom].append(record)
@@ -41,6 +42,7 @@ def _group_chains_by_ref_chrom(
 
 
 def _without_ncbi_version(chrom: str) -> str:
+    # Strip a terminal numeric accession version when it is unambiguous.
     prefix, dot, suffix = chrom.rpartition(".")
     if dot and suffix.isdigit():
         return prefix
@@ -50,6 +52,7 @@ def _without_ncbi_version(chrom: str) -> str:
 def _bed_chrom_lookup(
     cnees_by_chrom: dict[str, list[BedInterval]],
 ) -> dict[str, list[BedInterval]]:
+    # Build exact and safe version-stripped chromosome aliases for BED intervals.
     lookup = dict(cnees_by_chrom)
     stripped_to_originals: defaultdict[str, list[str]] = defaultdict(list)
     for chrom in cnees_by_chrom:
@@ -64,6 +67,7 @@ def _bed_chrom_lookup(
 def iter_candidate_rows(
     chains: list[ChainRecord], cnees: list[BedInterval]
 ) -> list[dict[str, str | int]]:
+    # Emit every chain/CNEE pair whose reference-side spans overlap at all.
     rows: list[dict[str, str | int]] = []
     cnees_by_chrom = group_bed_by_chrom(cnees)
     cnees_by_chain_chrom = _bed_chrom_lookup(cnees_by_chrom)
@@ -120,6 +124,7 @@ def iter_candidate_rows(
 
 
 def write_candidates(index_path: str | Path, bed_path: str | Path, out_path: str | Path) -> int:
+    # Load indexed chains and CNEEs, then write the candidate-pair TSV.
     _, records = load_index(index_path)
     cnees = parse_bed(bed_path)
     rows = iter_candidate_rows(records, cnees)

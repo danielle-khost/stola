@@ -15,11 +15,13 @@ FORMAT_VERSION = 1
 
 
 def _plain_chain_path_for_gzip(chain_path: Path, index_path: Path) -> Path:
+    # Choose the deterministic decompressed chain path next to the index file.
     name = chain_path.name[:-3] if chain_path.name.endswith(".gz") else chain_path.name
     return index_path.parent / name
 
 
 def _ensure_plain_chain(chain_file: str | Path, index_path: str | Path) -> Path:
+    # Return a plain chain path, decompressing .gz input into the index directory.
     chain_path = Path(chain_file)
     if chain_path.suffix != ".gz":
         return chain_path.resolve()
@@ -30,6 +32,7 @@ def _ensure_plain_chain(chain_file: str | Path, index_path: str | Path) -> Path:
 
 
 def scan_chain_file(chain_path: str | Path) -> list[ChainRecord]:
+    # Scan chain headers and record byte spans for later random extraction.
     records: list[ChainRecord] = []
     current_header: str | None = None
     current_start = 0
@@ -63,6 +66,7 @@ def scan_chain_file(chain_path: str | Path) -> list[ChainRecord]:
 
 
 def build_index(chain_file: str | Path, out_path: str | Path) -> dict[str, Any]:
+    # Build the transparent JSON chain index consumed by later workflow stages.
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     indexed_chain_path = _ensure_plain_chain(chain_file, out)
@@ -81,6 +85,7 @@ def build_index(chain_file: str | Path, out_path: str | Path) -> dict[str, Any]:
 
 
 def load_index(index_path: str | Path) -> tuple[dict[str, Any], list[ChainRecord]]:
+    # Load and validate a chain index, returning metadata plus typed records.
     with Path(index_path).open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if int(payload.get("format_version", -1)) != FORMAT_VERSION:

@@ -11,6 +11,7 @@ from .bed import parse_bed
 
 SUMMARY_COLUMNS = [
     "cnee_id",
+    "projection_status",
     "num_query_alignments",
     "overlap_fractions",
     "gap_bases",
@@ -26,14 +27,28 @@ class CneeSummary:
     gap_bases: list[str] = field(default_factory=list)
     sequence_identities: list[str] = field(default_factory=list)
     sequence_mismatches: list[str] = field(default_factory=list)
+    candidate_count: int = 0
+    aligned_candidate_count: int = 0
 
     @property
     def num_query_alignments(self) -> int:
+        # Count aligned query projections represented in this summary row.
         return len(self.overlap_fractions)
 
+    @property
+    def projection_status(self) -> str:
+        # Distinguish aligned, gap-only/lost, and no-candidate/missing CNEEs.
+        if self.aligned_candidate_count > 0:
+            return "aligned"
+        if self.candidate_count > 0:
+            return "lost"
+        return "missing"
+
     def row(self) -> dict[str, str | int]:
+        # Convert collected per-CNEE values into the output TSV row shape.
         return {
             "cnee_id": self.cnee_id,
+            "projection_status": self.projection_status,
             "num_query_alignments": self.num_query_alignments,
             "overlap_fractions": ",".join(self.overlap_fractions),
             "gap_bases": ",".join(self.gap_bases),
@@ -54,6 +69,7 @@ def summarize_overlap_stats(
     query alignments. This matches the query BED output, which omits fully
     gapped spanning candidates.
     """
+    # Aggregate overlap, gap, and sequence metrics by reference CNEE ID.
     summaries: OrderedDict[str, CneeSummary] = OrderedDict()
     if cnee_bed is not None:
         for interval in parse_bed(cnee_bed):
@@ -71,10 +87,14 @@ def summarize_overlap_stats(
         if missing:
             raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
         for row in reader:
-            if aligned_only and int(row["aligned_bases"]) <= 0:
-                continue
             cnee_id = row["cnee_id"]
             summary = summaries.setdefault(cnee_id, CneeSummary(cnee_id=cnee_id))
+            summary.candidate_count += 1
+            aligned_bases = int(row["aligned_bases"])
+            if aligned_bases > 0:
+                summary.aligned_candidate_count += 1
+            if aligned_only and aligned_bases <= 0:
+                continue
             summary.overlap_fractions.append(row["covered_fraction"])
             summary.gap_bases.append(row["gap_bases_within_chain_span"])
             seq_identity = row.get("seq_identity", ".")
@@ -84,7 +104,12 @@ def summarize_overlap_stats(
                 summary.sequence_mismatches.append(row["seq_mismatches"])
 
     with Path(out_path).open("w", encoding="utf-8", newline="") as out_handle:
-        writer = csv.DictWriter(out_handle, fieldnames=SUMMARY_COLUMNS, delimiter="\t")
+        writer = csv.DictWriter(
+            out_handle,
+            fieldnames=SUMMARY_COLUMNS,
+            delimiter="\t",
+            lineterminator="\n",
+        )
         writer.writeheader()
         for summary in summaries.values():
             writer.writerow(summary.row())

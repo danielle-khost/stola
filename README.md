@@ -25,11 +25,11 @@ intermediate index and candidate TSV files.
 
 The current orthology pass draws an edge for every aligned query projection,
 then classifies connected components as `one2one`, `one2many`, `many2one`,
-`missing`, or the catch-all `complex/many2many`. Filtering logic is intentionally
-deferred so test runs can expose the raw duplication/loss patterns. The
-orthology TSV has three columns: `query_cnee_id`, `partner_ref_cnees`, and
-`orthology_category`; missing reference CNEEs are written as `NA`, the reference
-CNEE ID, and `missing`.
+`lost`, `missing`, or the catch-all `complex/many2many`. Filtering logic is
+intentionally deferred so test runs can expose the raw duplication/loss
+patterns. The orthology TSV has three columns: `query_cnee_id`,
+`partner_ref_cnees`, and `orthology_category`; lost and missing reference CNEEs
+are written with `NA` as the query ID.
 
 When both `--ref-fasta` and `--query-fasta` are supplied, the stats and summary
 also include direct chain-aligned sequence identity and mismatch counts. These

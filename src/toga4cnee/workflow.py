@@ -45,6 +45,7 @@ def run_workflow(
     work_dir: str | Path | None = None,
 ) -> WorkflowResult:
     """Run indexing, candidate discovery, overlap stats, and query BED export."""
+    # Normalize output paths, validate paired FASTA inputs, and choose a work dir.
     if flank_size < 0:
         raise ValueError("flank_size must be non-negative")
     if (ref_fasta is None) != (query_fasta is None):
@@ -135,6 +136,7 @@ def _run_workflow_in_dir(
     flank_size: int,
     work_dir: Path,
 ) -> WorkflowResult:
+    # Execute the full workflow in order, keeping intermediates under work_dir.
     index_path = work_dir / "chain_index.json"
     candidates_path = work_dir / "candidate_chains.tsv"
 
@@ -186,6 +188,7 @@ def _write_stats(
     flank_size: int,
     sequence_comparator: SequenceComparator | None = None,
 ) -> int:
+    # Stream overlap-stat rows to disk, optionally adding sequence metrics.
     stats_count = 0
     rows = iter_overlap_rows(
         index_path,

@@ -51,10 +51,12 @@ class BlockIndex:
 
     @classmethod
     def from_blocks(cls, blocks: list[ChainBlock]) -> "BlockIndex":
+        # Sort blocks and cache reference ends for fast overlap lookups.
         ordered = sorted(blocks, key=lambda block: (block.ref_start, block.ref_end))
         return cls(ordered, [block.ref_end for block in ordered])
 
     def overlapping(self, start: int, end: int) -> Iterator[ChainBlock]:
+        # Yield blocks whose reference intervals overlap the requested span.
         index = bisect_right(self.ref_ends, start)
         while index < len(self.blocks):
             block = self.blocks[index]
@@ -65,6 +67,7 @@ class BlockIndex:
 
 
 def read_candidates(path: str | Path) -> list[dict[str, str]]:
+    # Load the candidate TSV and verify it has the expected columns.
     with Path(path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         missing = [column for column in CANDIDATE_COLUMNS if column not in reader.fieldnames]
@@ -79,6 +82,7 @@ def _project_overlap_to_query(
     ref_overlap_start: int,
     ref_overlap_end: int,
 ) -> tuple[int, int]:
+    # Convert a reference-side block overlap into query-side coordinates.
     offset_start = ref_overlap_start - block.ref_start
     offset_end = ref_overlap_end - block.ref_start
     if query_strand == "+":
@@ -96,6 +100,7 @@ def _aligned_bases(
     end: int,
     query_strand: str | None = None,
 ) -> tuple[int, int | None, int | None, list[tuple[int, int]]]:
+    # Count aligned bases and collect merged query segments for a ref interval.
     aligned = 0
     query_segments: list[tuple[int, int]] = []
     for block in blocks.overlapping(start, end):
@@ -123,6 +128,7 @@ def _aligned_bases(
 
 
 def _merge_segments(segments: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    # Collapse overlapping or touching query segments into nonredundant spans.
     if not segments:
         return []
     ordered = sorted(segments)
@@ -139,6 +145,7 @@ def _merge_segments(segments: list[tuple[int, int]]) -> list[tuple[int, int]]:
 def _block_fields(
     query_start: int | None, query_segments: list[tuple[int, int]]
 ) -> tuple[int, str, str]:
+    # Format merged query segments as BED-style block counts, sizes, and starts.
     if query_start is None or not query_segments:
         return 0, ".", "."
     sizes = ",".join(str(end - start) for start, end in query_segments) + ","
@@ -147,6 +154,7 @@ def _block_fields(
 
 
 def _rank_candidates(rows: list[dict[str, str]]) -> dict[tuple[str, str], int]:
+    # Rank each CNEE's candidate chains by score, breaking ties by chain ID.
     grouped: defaultdict[str, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
         grouped[row["cnee_uid"]].append(row)
@@ -168,6 +176,7 @@ def iter_overlap_rows(
     flank_size: int = 1000,
     sequence_comparator: SequenceComparator | None = None,
 ) -> Iterator[dict[str, str | int | float]]:
+    # Stream one overlap-stat row per candidate chain/CNEE pair.
     if flank_size < 0:
         raise ValueError("flank_size must be non-negative")
     payload, records = load_index(index_path)
@@ -263,6 +272,7 @@ def calculate_overlap_rows(
     candidate_path: str | Path,
     flank_size: int = 1000,
 ) -> list[dict[str, str | int | float]]:
+    # Materialize overlap rows for tests and small programmatic callers.
     return list(iter_overlap_rows(index_path, candidate_path, flank_size))
 
 
@@ -273,6 +283,7 @@ def write_overlap_stats(
     out_path: str | Path,
     flank_size: int = 1000,
 ) -> int:
+    # Write overlap stats directly from an index and candidate table.
     # BED is intentionally accepted here to keep the CLI contract explicit. The
     # candidate table carries the CNEE coordinates used for v1 stats.
     _ = bed_path

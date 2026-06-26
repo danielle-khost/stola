@@ -48,6 +48,7 @@ class FastaAccessor:
     """Random-access FASTA reader with conservative accession-version aliases."""
 
     def __init__(self, fasta_path: str | Path, index_path: str | Path) -> None:
+        # Open the FASTA and make sure a reusable byte-offset index is available.
         self.fasta_path = Path(fasta_path)
         self.index_path = Path(index_path)
         if not self.index_path.exists():
@@ -58,6 +59,7 @@ class FastaAccessor:
 
     @staticmethod
     def _strip_version(seq_id: str) -> str:
+        # Remove a terminal numeric accession version from a sequence ID.
         prefix, dot, suffix = seq_id.rpartition(".")
         if dot and suffix.isdigit():
             return prefix
@@ -65,6 +67,7 @@ class FastaAccessor:
 
     @classmethod
     def _build_aliases(cls, keys: Iterable[str]) -> dict[str, str]:
+        # Map exact IDs and unambiguous version-stripped IDs to FASTA records.
         exact = {key: key for key in keys}
         stripped: dict[str, list[str]] = {}
         for key in exact:
@@ -77,6 +80,7 @@ class FastaAccessor:
         return aliases
 
     def _build_index(self) -> None:
+        # Scan the FASTA once and save per-record byte layout metadata.
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         rows: list[FastaRecordIndex] = []
         current_id: str | None = None
@@ -139,6 +143,7 @@ class FastaAccessor:
                 )
 
     def _read_index(self) -> dict[str, FastaRecordIndex]:
+        # Load saved FASTA byte-offset metadata into typed records.
         records: dict[str, FastaRecordIndex] = {}
         with self.index_path.open("r", encoding="utf-8") as handle:
             for raw_line in handle:
@@ -156,6 +161,7 @@ class FastaAccessor:
         return records
 
     def fetch(self, seq_id: str, start: int, end: int) -> str:
+        # Fetch a half-open FASTA interval using byte offsets instead of scanning.
         resolved = self.aliases.get(seq_id)
         if resolved is None:
             raise KeyError(f"Sequence {seq_id!r} was not found in {self.fasta_path}")
@@ -179,6 +185,7 @@ class FastaAccessor:
         return b"".join(chunks).decode("ascii").upper()
 
     def close(self) -> None:
+        # Close the underlying FASTA file handle.
         self.handle.close()
 
 
@@ -191,12 +198,14 @@ class SequenceComparator:
         query_fasta: str | Path,
         work_dir: str | Path,
     ) -> None:
+        # Prepare random-access readers for the reference and query FASTA files.
         work_path = Path(work_dir)
         work_path.mkdir(parents=True, exist_ok=True)
         self.ref = FastaAccessor(ref_fasta, work_path / "ref_fasta.idx")
         self.query = FastaAccessor(query_fasta, work_path / "query_fasta.idx")
 
     def close(self) -> None:
+        # Close both FASTA readers held by the comparator.
         self.ref.close()
         self.query.close()
 
@@ -209,6 +218,7 @@ class SequenceComparator:
         query_strand: str,
         aligned_segments: list[AlignedSegment],
     ) -> dict[str, str | int | float]:
+        # Compare chain-aligned reference/query sequence and summarize identity.
         ref_len = ref_end - ref_start
         if not aligned_segments:
             return {
@@ -261,6 +271,7 @@ def aligned_segments_for_interval(
     ref_end: int,
     query_strand: str,
 ) -> list[AlignedSegment]:
+    # Project each aligned block overlap into paired reference/query segments.
     segments: list[AlignedSegment] = []
     for block in blocks:
         overlap_start = max(ref_start, block.ref_start)

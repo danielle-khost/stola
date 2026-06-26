@@ -24,10 +24,12 @@ class ChainRecord:
     byte_length: int
 
     def to_dict(self) -> dict[str, Any]:
+        # Serialize a chain record into JSON-compatible index metadata.
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ChainRecord":
+        # Rebuild a typed chain record from the JSON index payload.
         return cls(
             chain_id=str(data["chain_id"]),
             score=int(data["score"]),
@@ -57,6 +59,7 @@ class BedInterval:
 
     @property
     def length(self) -> int:
+        # Report the BED interval length using half-open coordinates.
         return self.end - self.start
 
 
@@ -69,4 +72,5 @@ class ChainBlock:
 
     @property
     def ref_length(self) -> int:
+        # Report the reference-side aligned block length.
         return self.ref_end - self.ref_start

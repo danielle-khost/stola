@@ -49,6 +49,7 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
             [
                 "chr1\t120\t240\tCNEE_PARTIAL",
                 "chr2\t175\t225\tCNEE_GAPPED",
+                "chr3\t10\t20\tCNEE_NO_CHAIN",
                 "",
             ]
         ),
@@ -214,15 +215,20 @@ class WorkflowTests(unittest.TestCase):
             count = summarize_overlap_stats(stats, summary, cnee_bed=bed)
             rows = _read_tsv(summary)
 
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 3)
         self.assertEqual(rows[0]["cnee_id"], "CNEE_PARTIAL")
+        self.assertEqual(rows[0]["projection_status"], "aligned")
         self.assertEqual(rows[0]["num_query_alignments"], "2")
         self.assertEqual(rows[0]["overlap_fractions"], "1.0,0.5833333333333334")
         self.assertEqual(rows[0]["gap_bases"], "0,50")
         self.assertEqual(rows[1]["cnee_id"], "CNEE_GAPPED")
+        self.assertEqual(rows[1]["projection_status"], "lost")
         self.assertEqual(rows[1]["num_query_alignments"], "0")
         self.assertEqual(rows[1]["overlap_fractions"], "")
         self.assertEqual(rows[1]["gap_bases"], "")
+        self.assertEqual(rows[2]["cnee_id"], "CNEE_NO_CHAIN")
+        self.assertEqual(rows[2]["projection_status"], "missing")
+        self.assertEqual(rows[2]["num_query_alignments"], "0")
 
     def test_single_workflow_writes_stats_and_query_bed(self) -> None:
         if not _has_networkx():
@@ -264,14 +270,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.candidate_count, 3)
         self.assertEqual(result.stats_count, 3)
         self.assertEqual(result.query_bed_count, 2)
-        self.assertEqual(result.summary_count, 2)
-        self.assertEqual(result.orthology_result.orthology_rows, 3)
-        self.assertEqual(result.plot_result.histogram_n, 2)
+        self.assertEqual(result.summary_count, 3)
+        self.assertEqual(result.orthology_result.orthology_rows, 4)
+        self.assertEqual(result.plot_result.histogram_n, 3)
         self.assertEqual(result.plot_result.overlap_density_n, 2)
         self.assertEqual(result.plot_result.sequence_identity_density_n, 0)
         self.assertEqual(len(stats_rows), 3)
-        self.assertEqual(len(summary_rows), 2)
-        self.assertEqual(len(orthology_rows), 3)
+        self.assertEqual(len(summary_rows), 3)
+        self.assertEqual(len(orthology_rows), 4)
         self.assertEqual(
             list(orthology_rows[0]),
             ["query_cnee_id", "partner_ref_cnees", "orthology_category"],
@@ -294,10 +300,18 @@ class WorkflowTests(unittest.TestCase):
         }
         self.assertEqual(categories["q_CNEE_PARTIAL_1"], "one2many")
         self.assertEqual(categories["q_CNEE_PARTIAL_2"], "one2many")
-        self.assertEqual(categories["NA"], "missing")
-        missing_row = next(row for row in orthology_rows if row["query_cnee_id"] == "NA")
-        self.assertEqual(missing_row["partner_ref_cnees"], "CNEE_GAPPED")
-        self.assertEqual(missing_row["orthology_category"], "missing")
+        na_categories = {
+            row["partner_ref_cnees"]: row["orthology_category"]
+            for row in orthology_rows
+            if row["query_cnee_id"] == "NA"
+        }
+        self.assertEqual(na_categories["CNEE_GAPPED"], "lost")
+        self.assertEqual(na_categories["CNEE_NO_CHAIN"], "missing")
+        summary_statuses = {
+            row["cnee_id"]: row["projection_status"] for row in summary_rows
+        }
+        self.assertEqual(summary_statuses["CNEE_GAPPED"], "lost")
+        self.assertEqual(summary_statuses["CNEE_NO_CHAIN"], "missing")
 
     def test_sequence_comparison_metrics_for_plus_strand_projection(self) -> None:
         try:
