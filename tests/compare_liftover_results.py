@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Compare TOGA4CNEE query CNEEs against UCSC liftOver outputs.
+"""Compare reference CNEE recovery between TOGA4CNEE and UCSC liftOver.
 
 This is a standalone test/diagnostic script, not part of the main package CLI.
 
@@ -7,13 +7,14 @@ Example:
     conda activate biopython
     python tests/compare_liftover_results.py \
         --toga-bed /private/tmp/toga4cnee_pigeon_chicken_orthology/query_cnees.bed \
-        --toga-summary /private/tmp/toga4cnee_pigeon_chicken_orthology/overlap_stats.summary.tsv \
-        --toga-orthology /private/tmp/toga4cnee_pigeon_chicken_orthology/overlap_stats.orthology.tsv
+        --toga-orthology /private/tmp/toga4cnee_pigeon_chicken_orthology/overlap_stats.orthology.tsv \
+        --out /private/tmp/pigeon_liftover_ref_comparison.tsv
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import re
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import pandas as pd
 
 DEFAULT_UCSC_BED = Path(__file__).resolve().parent / "HLcolLivi3.ucscLiftover.bed"
 DEFAULT_UCSC_UNMAPPED = Path(__file__).resolve().parent / "unmapped"
+DEFAULT_REF_BED = Path(__file__).resolve().parent / "gGal7_cnee_final_data_filtered.fixed.bed"
 
 
 def read_bed(path: str | Path, source: str) -> pd.DataFrame:
@@ -45,6 +47,11 @@ def read_bed(path: str | Path, source: str) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows, columns=["chrom", "start", "end", "name", "source"])
+
+
+def read_ref_ids(path: str | Path) -> set[str]:
+    # Read the source reference BED and return its reference CNEE IDs.
+    return set(read_bed(path, "reference")["name"])
 
 
 def read_orthology_map(path: str | Path | None) -> dict[str, set[str]]:
@@ -105,101 +112,98 @@ def add_comparison_keys(
     return output
 
 
-def summarize_toga_missing(path: str | Path) -> int:
-    # Count TOGA4CNEE reference CNEEs with no aligned query BED row.
-    df = pd.read_csv(path, sep="\t", dtype=str).fillna("")
-    if "projection_status" in df.columns:
-        return int(df["projection_status"].isin(["lost", "missing"]).sum())
-    if "num_query_alignments" not in df.columns:
-        raise ValueError(
-            f"{path} needs projection_status or num_query_alignments to count missing rows"
-        )
-    return int((df["num_query_alignments"].astype(int) == 0).sum())
-
-
-def read_unmapped_ids(path: str | Path) -> set[str]:
-    # Read UCSC liftOver unmapped BED-like records, skipping reason/comment lines.
-    ids: set[str] = set()
-    with Path(path).open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.rstrip("\n")
-            if not line or line.startswith("#"):
-                continue
-            fields = line.split("\t")
-            if len(fields) >= 4:
-                ids.add(fields[3])
-    return ids
-
-
-def build_locus_index(df: pd.DataFrame) -> dict[tuple[str, int, int], set[str]]:
-    # Index rows by exact output locus, merging all comparable IDs at that locus.
-    grouped: dict[tuple[str, int, int], set[str]] = {}
+def collect_ref_ids(df: pd.DataFrame) -> set[str]:
+    # Collapse BED rows into the set of source reference CNEEs they represent.
+    ref_ids: set[str] = set()
     for row in df.itertuples(index=False):
-        grouped.setdefault(row.locus_key, set()).update(row.id_set)
-    return grouped
+        ref_ids.update(row.id_set)
+    ref_ids.discard("")
+    ref_ids.discard(".")
+    return ref_ids
 
 
-def classify_rows(
-    df: pd.DataFrame, other_by_locus: dict[tuple[str, int, int], set[str]]
-) -> dict[str, int]:
-    # Classify each BED row once relative to the other method's exact loci.
-    counts = {"perfect": 0, "different_ids": 0, "unique": 0}
-    for row in df.itertuples(index=False):
-        other_ids = other_by_locus.get(row.locus_key)
-        if other_ids is None:
-            counts["unique"] += 1
-        elif row.id_set.intersection(other_ids):
-            counts["perfect"] += 1
-        else:
-            counts["different_ids"] += 1
-    return counts
+def write_venn_svg(
+    out_path: str | Path,
+    species: str,
+    left_only: int,
+    shared: int,
+    right_only: int,
+) -> None:
+    # Draw a small dependency-free Venn diagram summarizing reference-ID overlap.
+    width, height = 760, 440
+    left_cx, right_cx, cy, radius = 310, 450, 210, 135
+    title = html.escape(f"{species} reference CNEE recovery")
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+<style>
+text{{font-family:Arial,Helvetica,sans-serif;fill:#1f2933}}
+.title{{font-size:24px;font-weight:700}}
+.label{{font-size:17px;font-weight:700}}
+.count{{font-size:28px;font-weight:700}}
+.note{{font-size:13px;fill:#52606d}}
+</style>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text class="title" x="40" y="44">{title}</text>
+<circle cx="{left_cx}" cy="{cy}" r="{radius}" fill="#3b82f6" fill-opacity="0.32" stroke="#2563eb" stroke-width="2"/>
+<circle cx="{right_cx}" cy="{cy}" r="{radius}" fill="#f59e0b" fill-opacity="0.34" stroke="#d97706" stroke-width="2"/>
+<text class="label" x="{left_cx - 75}" y="{cy - radius - 22}">TOGA4CNEE</text>
+<text class="label" x="{right_cx - 52}" y="{cy - radius - 22}">UCSC liftOver</text>
+<text class="count" x="{left_cx - 82}" y="{cy + 8}" text-anchor="middle">{left_only}</text>
+<text class="count" x="{(left_cx + right_cx) / 2:.0f}" y="{cy + 8}" text-anchor="middle">{shared}</text>
+<text class="count" x="{right_cx + 82}" y="{cy + 8}" text-anchor="middle">{right_only}</text>
+<text class="note" x="{left_cx - 82}" y="{cy + 36}" text-anchor="middle">unique</text>
+<text class="note" x="{(left_cx + right_cx) / 2:.0f}" y="{cy + 36}" text-anchor="middle">shared</text>
+<text class="note" x="{right_cx + 82}" y="{cy + 36}" text-anchor="middle">unique</text>
+</svg>
+"""
+    Path(out_path).write_text(svg, encoding="utf-8")
 
 
 def compare_outputs(
     toga_bed: str | Path,
-    toga_summary: str | Path,
     ucsc_bed: str | Path,
-    ucsc_unmapped: str | Path,
+    ref_bed: str | Path,
     toga_orthology: str | Path | None = None,
-) -> pd.DataFrame:
-    # Build the requested method-level comparison summary table.
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    # Build a reference-ID recovery summary for both methods.
+    ref_ids = read_ref_ids(ref_bed)
     orthology_map = read_orthology_map(toga_orthology)
     toga = add_comparison_keys(read_bed(toga_bed, "toga4cnee"), orthology_map)
     ucsc = add_comparison_keys(read_bed(ucsc_bed, "ucsc_liftover"))
 
-    toga_by_locus = build_locus_index(toga)
-    ucsc_by_locus = build_locus_index(ucsc)
-    toga_counts = classify_rows(toga, ucsc_by_locus)
-    ucsc_counts = classify_rows(ucsc, toga_by_locus)
+    toga_ref_ids = collect_ref_ids(toga).intersection(ref_ids)
+    ucsc_ref_ids = collect_ref_ids(ucsc).intersection(ref_ids)
+    shared = toga_ref_ids.intersection(ucsc_ref_ids)
+    toga_unique = toga_ref_ids.difference(ucsc_ref_ids)
+    ucsc_unique = ucsc_ref_ids.difference(toga_ref_ids)
 
     rows = [
         {
-            "category": "total annotations",
+            "category": "total ref annotations",
+            "toga4cnee": len(ref_ids),
+            "ucsc_liftover": len(ref_ids),
+        },
+        {
+            "category": "total query annotations",
             "toga4cnee": len(toga),
             "ucsc_liftover": len(ucsc),
         },
         {
-            "category": "total missing",
-            "toga4cnee": summarize_toga_missing(toga_summary),
-            "ucsc_liftover": len(read_unmapped_ids(ucsc_unmapped)),
+            "category": "total shared annotations",
+            "toga4cnee": len(shared),
+            "ucsc_liftover": len(shared),
         },
         {
-            "category": "perfect match",
-            "toga4cnee": toga_counts["perfect"],
-            "ucsc_liftover": ucsc_counts["perfect"],
-        },
-        {
-            "category": "different IDs",
-            "toga4cnee": toga_counts["different_ids"],
-            "ucsc_liftover": ucsc_counts["different_ids"],
-        },
-        {
-            "category": "unique annotations",
-            "toga4cnee": toga_counts["unique"],
-            "ucsc_liftover": ucsc_counts["unique"],
+            "category": "total unique annotations",
+            "toga4cnee": len(toga_unique),
+            "ucsc_liftover": len(ucsc_unique),
         },
     ]
-    return pd.DataFrame(rows, columns=["category", "toga4cnee", "ucsc_liftover"])
+    venn_counts = {
+        "toga4cnee_unique": len(toga_unique),
+        "shared": len(shared),
+        "ucsc_liftover_unique": len(ucsc_unique),
+    }
+    return pd.DataFrame(rows, columns=["category", "toga4cnee", "ucsc_liftover"]), venn_counts
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -208,30 +212,54 @@ def build_parser() -> argparse.ArgumentParser:
         description="Compare TOGA4CNEE query BED output to UCSC liftOver results."
     )
     parser.add_argument("--toga-bed", required=True, type=Path)
-    parser.add_argument("--toga-summary", required=True, type=Path)
+    parser.add_argument("--ref-bed", default=DEFAULT_REF_BED, type=Path)
     parser.add_argument("--toga-orthology", default=None, type=Path)
     parser.add_argument("--ucsc-bed", default=DEFAULT_UCSC_BED, type=Path)
-    parser.add_argument("--ucsc-unmapped", default=DEFAULT_UCSC_UNMAPPED, type=Path)
     parser.add_argument("--out", default=None, type=Path)
+    parser.add_argument("--out-venn", default=None, type=Path)
+    parser.add_argument(
+        "--toga-summary",
+        default=None,
+        type=Path,
+        help="Accepted for compatibility with older comparison commands; unused.",
+    )
+    parser.add_argument(
+        "--ucsc-unmapped",
+        default=DEFAULT_UCSC_UNMAPPED,
+        type=Path,
+        help="Accepted for compatibility with older comparison commands; unused.",
+    )
     return parser
 
 
 def main() -> None:
     # Run the comparison and print or write the summary table.
     args = build_parser().parse_args()
-    summary = compare_outputs(
+    species = Path(args.toga_bed).resolve().parent.name
+    summary, venn_counts = compare_outputs(
         toga_bed=args.toga_bed,
-        toga_summary=args.toga_summary,
         toga_orthology=args.toga_orthology,
         ucsc_bed=args.ucsc_bed,
-        ucsc_unmapped=args.ucsc_unmapped,
+        ref_bed=args.ref_bed,
     )
+    out_venn = args.out_venn
+    if out_venn is None and args.out is not None:
+        out_venn = args.out.with_suffix(".venn.svg")
     if args.out is None:
         print(summary.to_csv(sep="\t", index=False), end="")
     else:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         summary.to_csv(args.out, sep="\t", index=False)
         print(f"Wrote comparison summary -> {args.out}")
+    if out_venn is not None:
+        write_venn_svg(
+            out_venn,
+            species=species,
+            left_only=venn_counts["toga4cnee_unique"],
+            shared=venn_counts["shared"],
+            right_only=venn_counts["ucsc_liftover_unique"],
+        )
+        print(f"Wrote Venn diagram -> {out_venn}")
 
 
 if __name__ == "__main__":
