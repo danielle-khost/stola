@@ -11,7 +11,6 @@ from .candidates import write_candidates
 from .index import build_index
 from .orthology import OrthologyResult, classify_orthology
 from .overlap import OVERLAP_COLUMNS, iter_overlap_rows
-from .plots import PlotResult, write_qc_plots
 from .sequence_compare import SequenceComparator
 from .summary import summarize_overlap_stats
 
@@ -24,7 +23,6 @@ class WorkflowResult:
     query_bed_count: int
     summary_count: int
     orthology_result: OrthologyResult
-    plot_result: PlotResult
     index_path: Path
     candidates_path: Path
 
@@ -35,13 +33,12 @@ def run_workflow(
     out_bed: str | Path,
     out_stats: str | Path,
     out_summary: str | Path | None = None,
-    out_alignment_histogram: str | Path | None = None,
-    out_overlap_density: str | Path | None = None,
-    out_sequence_identity_density: str | Path | None = None,
     out_orthology: str | Path | None = None,
     ref_fasta: str | Path | None = None,
     query_fasta: str | Path | None = None,
     flank_size: int = 1000,
+    min_sequence_identity: float = 0.7,
+    max_fraction_gap: float = 0.9,
     work_dir: str | Path | None = None,
 ) -> WorkflowResult:
     """Run indexing, candidate discovery, overlap stats, and query BED export."""
@@ -56,21 +53,6 @@ def run_workflow(
     out_summary_path = (
         Path(out_summary) if out_summary is not None else out_stats.with_suffix(".summary.tsv")
     )
-    out_alignment_histogram_path = (
-        Path(out_alignment_histogram)
-        if out_alignment_histogram is not None
-        else out_stats.with_suffix(".num_query_alignments.svg")
-    )
-    out_overlap_density_path = (
-        Path(out_overlap_density)
-        if out_overlap_density is not None
-        else out_stats.with_suffix(".overlap_fraction_density.svg")
-    )
-    out_sequence_identity_density_path = (
-        Path(out_sequence_identity_density)
-        if out_sequence_identity_density is not None
-        else out_stats.with_suffix(".sequence_identity_density.svg")
-    )
     out_orthology_path = (
         Path(out_orthology)
         if out_orthology is not None
@@ -79,9 +61,6 @@ def run_workflow(
     out_bed.parent.mkdir(parents=True, exist_ok=True)
     out_stats.parent.mkdir(parents=True, exist_ok=True)
     out_summary_path.parent.mkdir(parents=True, exist_ok=True)
-    out_alignment_histogram_path.parent.mkdir(parents=True, exist_ok=True)
-    out_overlap_density_path.parent.mkdir(parents=True, exist_ok=True)
-    out_sequence_identity_density_path.parent.mkdir(parents=True, exist_ok=True)
     out_orthology_path.parent.mkdir(parents=True, exist_ok=True)
 
     if work_dir is None:
@@ -92,13 +71,12 @@ def run_workflow(
                 out_bed,
                 out_stats,
                 out_summary_path,
-                out_alignment_histogram_path,
-                out_overlap_density_path,
-                out_sequence_identity_density_path,
                 out_orthology_path,
                 ref_fasta,
                 query_fasta,
                 flank_size,
+                min_sequence_identity,
+                max_fraction_gap,
                 Path(tmpdir),
             )
 
@@ -110,13 +88,12 @@ def run_workflow(
         out_bed,
         out_stats,
         out_summary_path,
-        out_alignment_histogram_path,
-        out_overlap_density_path,
-        out_sequence_identity_density_path,
         out_orthology_path,
         ref_fasta,
         query_fasta,
         flank_size,
+        min_sequence_identity,
+        max_fraction_gap,
         work_path,
     )
 
@@ -127,13 +104,12 @@ def _run_workflow_in_dir(
     out_bed: Path,
     out_stats: Path,
     out_summary: Path,
-    out_alignment_histogram: Path,
-    out_overlap_density: Path,
-    out_sequence_identity_density: Path,
     out_orthology: Path,
     ref_fasta: str | Path | None,
     query_fasta: str | Path | None,
     flank_size: int,
+    min_sequence_identity: float,
+    max_fraction_gap: float,
     work_dir: Path,
 ) -> WorkflowResult:
     # Execute the full workflow in order, keeping intermediates under work_dir.
@@ -158,15 +134,15 @@ def _run_workflow_in_dir(
     finally:
         if sequence_comparator is not None:
             sequence_comparator.close()
-    orthology_result = classify_orthology(out_stats, cnee_bed, out_orthology, out_bed)
-    summary_count = summarize_overlap_stats(out_stats, out_summary, cnee_bed=cnee_bed)
-    plot_result = write_qc_plots(
-        out_summary,
+    orthology_result = classify_orthology(
         out_stats,
-        out_alignment_histogram,
-        out_overlap_density,
-        out_sequence_identity_density,
+        cnee_bed,
+        out_orthology,
+        out_bed,
+        min_sequence_identity=min_sequence_identity,
+        max_fraction_gap=max_fraction_gap,
     )
+    summary_count = summarize_overlap_stats(out_stats, out_summary, cnee_bed=cnee_bed)
 
     return WorkflowResult(
         chain_count=int(index_payload["chain_count"]),
@@ -175,7 +151,6 @@ def _run_workflow_in_dir(
         query_bed_count=orthology_result.query_bed_rows,
         summary_count=summary_count,
         orthology_result=orthology_result,
-        plot_result=plot_result,
         index_path=index_path,
         candidates_path=candidates_path,
     )

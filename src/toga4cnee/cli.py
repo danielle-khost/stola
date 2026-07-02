@@ -18,21 +18,6 @@ def _run(args: argparse.Namespace) -> None:
         if args.out_summary is not None
         else args.out_stats.with_suffix(".summary.tsv")
     )
-    out_alignment_histogram = (
-        args.out_alignment_histogram
-        if args.out_alignment_histogram is not None
-        else args.out_stats.with_suffix(".num_query_alignments.svg")
-    )
-    out_overlap_density = (
-        args.out_overlap_density
-        if args.out_overlap_density is not None
-        else args.out_stats.with_suffix(".overlap_fraction_density.svg")
-    )
-    out_sequence_identity_density = (
-        args.out_sequence_identity_density
-        if args.out_sequence_identity_density is not None
-        else args.out_stats.with_suffix(".sequence_identity_density.svg")
-    )
     out_orthology = (
         args.out_orthology
         if args.out_orthology is not None
@@ -44,13 +29,12 @@ def _run(args: argparse.Namespace) -> None:
         args.out_bed,
         args.out_stats,
         out_summary=out_summary,
-        out_alignment_histogram=out_alignment_histogram,
-        out_overlap_density=out_overlap_density,
-        out_sequence_identity_density=out_sequence_identity_density,
         out_orthology=out_orthology,
         ref_fasta=args.ref_fasta,
         query_fasta=args.query_fasta,
         flank_size=args.flank_size,
+        min_sequence_identity=args.min_sequence_identity,
+        max_fraction_gap=args.max_fraction_gap,
         work_dir=args.work_dir,
     )
     print(f"Indexed {result.chain_count} chains")
@@ -61,9 +45,6 @@ def _run(args: argparse.Namespace) -> None:
         f"{out_orthology}"
     )
     print(f"Wrote {result.summary_count} CNEE summary rows -> {out_summary}")
-    print(f"Wrote alignment histogram -> {out_alignment_histogram}")
-    print(f"Wrote overlap density plot -> {out_overlap_density}")
-    print(f"Wrote sequence identity density plot -> {out_sequence_identity_density}")
     if args.work_dir is not None:
         print(f"Kept intermediates in {args.work_dir}")
 
@@ -132,30 +113,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Concise per-reference-CNEE summary TSV [default: OUT_STATS with .summary.tsv suffix]",
     )
     run_parser.add_argument(
-        "--out-alignment-histogram",
-        type=Path,
-        default=None,
-        help="SVG histogram of query alignment counts [default: OUT_STATS with .num_query_alignments.svg suffix]",
-    )
-    run_parser.add_argument(
-        "--out-overlap-density",
-        type=Path,
-        default=None,
-        help="SVG density plot of overlap fractions [default: OUT_STATS with .overlap_fraction_density.svg suffix]",
-    )
-    run_parser.add_argument(
-        "--out-sequence-identity-density",
-        type=Path,
-        default=None,
-        help="SVG density plot of sequence identity [default: OUT_STATS with .sequence_identity_density.svg suffix]",
-    )
-    run_parser.add_argument(
         "--out-orthology",
         type=Path,
         default=None,
         help="Graph-based orthology classification TSV [default: OUT_STATS with .orthology.tsv suffix]",
     )
     run_parser.add_argument("--flank-size", type=int, default=1000)
+    run_parser.add_argument(
+        "--min-sequence-identity",
+        type=float,
+        default=0.7,
+        help=(
+            "Minimum sequence identity for a solid orthology edge when FASTAs "
+            "are supplied [default: 0.7]"
+        ),
+    )
+    run_parser.add_argument(
+        "--max-fraction-gap",
+        type=float,
+        default=0.9,
+        help="Maximum gap fraction for a solid orthology edge [default: 0.9]",
+    )
     run_parser.add_argument(
         "--ref-fasta",
         type=Path,

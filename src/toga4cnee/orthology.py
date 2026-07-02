@@ -25,12 +25,33 @@ class Projection:
     query_end: int
     query_strand: str
     projection_name: str
+    sequence_identity: float | None
+    fraction_gap: float
 
 
 @dataclass(frozen=True)
 class ProjectionEvidence:
     projections: list[Projection]
     refs_with_candidates: set[str]
+
+
+@dataclass
+class EdgeMetrics:
+    sequence_identity: float | None
+    fraction_gap: float
+    projection_count: int = 1
+
+    def add_projection(self, projection: Projection) -> None:
+        # Keep the best sequence identity and lowest gap fraction for this edge.
+        if projection.sequence_identity is not None:
+            if self.sequence_identity is None:
+                self.sequence_identity = projection.sequence_identity
+            else:
+                self.sequence_identity = max(
+                    self.sequence_identity, projection.sequence_identity
+                )
+        self.fraction_gap = min(self.fraction_gap, projection.fraction_gap)
+        self.projection_count += 1
 
 
 @dataclass
@@ -41,6 +62,7 @@ class QueryCluster:
     end: int
     strands: set[str] = field(default_factory=set)
     refs: set[str] = field(default_factory=set)
+    edge_metrics: dict[str, EdgeMetrics] = field(default_factory=dict)
     projection_count: int = 0
     query_cnee_id: str = ""
     orthology_category: str = ""
@@ -62,9 +84,15 @@ def classify_orthology(
     cnee_bed: str | Path,
     out_orthology: str | Path,
     out_query_bed: str | Path,
+    min_sequence_identity: float = 0.7,
+    max_fraction_gap: float = 0.9,
 ) -> OrthologyResult:
     """Classify query CNEE loci from overlap stats and write TSV/BED outputs."""
-    # Build a ref/query graph from aligned projections and write orthology calls.
+    # Build graph evidence, filter solid edges, and write orthology calls.
+    if min_sequence_identity < 0 or min_sequence_identity > 1:
+        raise ValueError("min_sequence_identity must be between 0 and 1")
+    if max_fraction_gap < 0 or max_fraction_gap > 1:
+        raise ValueError("max_fraction_gap must be between 0 and 1")
     try:
         import networkx as nx
     except ImportError as exc:
@@ -78,18 +106,22 @@ def classify_orthology(
     projections = evidence.projections
     clusters = _cluster_query_projections(projections)
 
-    graph = nx.Graph()
-    for ref_id in ref_ids:
-        graph.add_node(_ref_node(ref_id), kind="ref", ref_id=ref_id)
-    for cluster in clusters:
-        graph.add_node(cluster.node_id, kind="query")
-        for ref_id in cluster.refs:
-            graph.add_edge(_ref_node(ref_id), cluster.node_id, weight=1)
-
-    components = [set(component) for component in nx.connected_components(graph)]
+    graph = _build_orthology_graph(nx, ref_ids, clusters)
+    solid_graph = _build_solid_graph(
+        nx,
+        graph,
+        min_sequence_identity=min_sequence_identity,
+        max_fraction_gap=max_fraction_gap,
+    )
+    components = [set(component) for component in nx.connected_components(solid_graph)]
     _assign_orthology_categories(components, clusters)
     orthology_count = _write_orthology_tsv(
-        graph, clusters, ref_ids, evidence.refs_with_candidates, out_orthology
+        solid_graph,
+        graph,
+        clusters,
+        ref_ids,
+        evidence.refs_with_candidates,
+        out_orthology,
     )
     bed_count = _write_query_bed(clusters, out_query_bed)
     return OrthologyResult(orthology_rows=orthology_count, query_bed_rows=bed_count)
@@ -109,6 +141,8 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
             "query_aligned_start",
             "query_aligned_end",
             "query_projection_name",
+            "gap_fraction_within_chain_span",
+            "seq_identity",
         }
         missing = sorted(required.difference(reader.fieldnames or []))
         if missing:
@@ -127,6 +161,8 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
                     query_end=int(row["query_aligned_end"]),
                     query_strand=row["query_strand"],
                     projection_name=row["query_projection_name"],
+                    sequence_identity=_parse_optional_float(row["seq_identity"]),
+                    fraction_gap=float(row["gap_fraction_within_chain_span"]),
                 )
             )
     return ProjectionEvidence(
@@ -160,10 +196,71 @@ def _cluster_query_projections(projections: list[Projection]) -> list[QueryClust
             current.end = max(current.end, projection.query_end)
             current.strands.add(projection.query_strand)
             current.refs.add(projection.ref_id)
+            _add_cluster_edge_metrics(current, projection)
             current.projection_count += 1
         if current is not None:
             clusters.append(current)
     return clusters
+
+
+def _add_cluster_edge_metrics(cluster: QueryCluster, projection: Projection) -> None:
+    # Aggregate projection scores for the graph edge between this ref/query pair.
+    metrics = cluster.edge_metrics.get(projection.ref_id)
+    if metrics is None:
+        cluster.edge_metrics[projection.ref_id] = EdgeMetrics(
+            sequence_identity=projection.sequence_identity,
+            fraction_gap=projection.fraction_gap,
+        )
+        return
+    metrics.add_projection(projection)
+
+
+def _build_orthology_graph(nx, ref_ids: list[str], clusters: list[QueryCluster]):
+    # Build a ref/query graph with sequence identity and gap fraction edge scores.
+    graph = nx.Graph()
+    for ref_id in ref_ids:
+        graph.add_node(_ref_node(ref_id), kind="ref", ref_id=ref_id)
+    for cluster in clusters:
+        graph.add_node(cluster.node_id, kind="query")
+        for ref_id in cluster.refs:
+            metrics = cluster.edge_metrics[ref_id]
+            graph.add_edge(
+                _ref_node(ref_id),
+                cluster.node_id,
+                sequence_identity=metrics.sequence_identity,
+                fraction_gap=metrics.fraction_gap,
+                projection_count=metrics.projection_count,
+            )
+    return graph
+
+
+def _build_solid_graph(
+    nx,
+    graph,
+    min_sequence_identity: float,
+    max_fraction_gap: float,
+):
+    # Copy all nodes but keep only edges that pass the current solid-match thresholds.
+    solid_graph = nx.Graph()
+    solid_graph.add_nodes_from(graph.nodes(data=True))
+    for left, right, data in graph.edges(data=True):
+        if _edge_is_solid(data, min_sequence_identity, max_fraction_gap):
+            solid_graph.add_edge(left, right, **data)
+    return solid_graph
+
+
+def _edge_is_solid(
+    edge_data: dict,
+    min_sequence_identity: float,
+    max_fraction_gap: float,
+) -> bool:
+    # Decide whether an edge is high-quality enough for orthology classification.
+    if float(edge_data["fraction_gap"]) >= max_fraction_gap:
+        return False
+    sequence_identity = edge_data.get("sequence_identity")
+    if sequence_identity is None:
+        return True
+    return float(sequence_identity) > min_sequence_identity
 
 
 def _assign_orthology_categories(
@@ -178,7 +275,7 @@ def _assign_orthology_categories(
     ):
         ref_nodes = sorted(node for node in component if str(node).startswith("ref:"))
         query_nodes = sorted(node for node in component if str(node).startswith("query:"))
-        if not query_nodes:
+        if not ref_nodes or not query_nodes:
             continue
         component_counter += 1
         ref_ids = [_node_ref_id(node) for node in ref_nodes]
@@ -210,7 +307,8 @@ def _assign_orthology_categories(
 
 
 def _write_orthology_tsv(
-    graph,
+    solid_graph,
+    all_graph,
     clusters: list[QueryCluster],
     ref_ids: list[str],
     refs_with_candidates: set[str],
@@ -228,9 +326,11 @@ def _write_orthology_tsv(
         )
         writer.writeheader()
         for cluster in sorted(clusters, key=lambda item: (item.chrom, item.start, item.end)):
+            if not cluster.query_cnee_id:
+                continue
             partner_refs = sorted(
                 _node_ref_id(node)
-                for node in graph.neighbors(cluster.node_id)
+                for node in solid_graph.neighbors(cluster.node_id)
                 if str(node).startswith("ref:")
             )
             writer.writerow(
@@ -242,16 +342,27 @@ def _write_orthology_tsv(
             )
             count += 1
 
-        ref_with_query = {
+        refs_with_solid_query = {
             _node_ref_id(node)
             for cluster in clusters
-            for node in graph.neighbors(cluster.node_id)
+            for node in solid_graph.neighbors(cluster.node_id)
+            if str(node).startswith("ref:")
+        }
+        refs_with_aligned_query = {
+            _node_ref_id(node)
+            for cluster in clusters
+            for node in all_graph.neighbors(cluster.node_id)
             if str(node).startswith("ref:")
         }
         for ref_id in ref_ids:
-            if ref_id in ref_with_query:
+            if ref_id in refs_with_solid_query:
                 continue
-            category = "lost" if ref_id in refs_with_candidates else "missing"
+            if ref_id not in refs_with_candidates:
+                category = "missing"
+            elif ref_id not in refs_with_aligned_query:
+                category = "lost"
+            else:
+                category = "uncertain_loss"
             writer.writerow(
                 {
                     "query_cnee_id": "NA",
@@ -268,6 +379,8 @@ def _write_query_bed(clusters: list[QueryCluster], out_path: str | Path) -> int:
     count = 0
     with Path(out_path).open("w", encoding="utf-8") as handle:
         for cluster in sorted(clusters, key=lambda item: (item.chrom, item.start, item.end)):
+            if not cluster.query_cnee_id:
+                continue
             handle.write(
                 "\t".join(
                     [
@@ -312,3 +425,10 @@ def _node_ref_id(node: str) -> str:
 def _clean_id(value: str) -> str:
     # Make a reference ID safe to embed in generated query CNEE IDs.
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+
+
+def _parse_optional_float(value: str) -> float | None:
+    # Convert TSV numeric fields to floats while preserving missing values.
+    if value == "." or value == "":
+        return None
+    return float(value)
