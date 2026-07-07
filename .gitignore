@@ -14,3 +14,5 @@ dist/
 *.fa
 *.fai
 unmapped*
+test_runs/
+dummy*

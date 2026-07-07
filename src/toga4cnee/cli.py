@@ -131,8 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--max-fraction-gap",
         type=float,
-        default=0.9,
-        help="Maximum gap fraction for a solid orthology edge [default: 0.9]",
+        default=0.1,
+        help="Maximum gap fraction for a solid orthology edge [default: 0.1]",
     )
     run_parser.add_argument(
         "--ref-fasta",

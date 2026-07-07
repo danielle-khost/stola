@@ -9,7 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from toga4cnee.plots import write_orthology_diagnostic_plots, write_qc_plots
+from toga4cnee.plots import (
+    write_gap_fraction_density,
+    write_multi_alignment_metric_densities,
+    write_orthology_diagnostic_plots,
+    write_qc_plots,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-fraction-gap",
         type=float,
-        default=0.9,
+        default=0.1,
         help="Maximum gap fraction used to define solid projections",
     )
     return parser
@@ -54,6 +59,13 @@ def main(argv: list[str] | None = None) -> None:
     alignment_histogram = args.out_dir / f"{prefix}.num_query_alignments.svg"
     overlap_density = args.out_dir / f"{prefix}.overlap_fraction_density.svg"
     sequence_identity_density = args.out_dir / f"{prefix}.sequence_identity_density.svg"
+    gap_fraction_density = args.out_dir / f"{prefix}.gap_fraction_density.svg"
+    multi_sequence_identity_density = (
+        args.out_dir / f"{prefix}.multi_query_sequence_identity_density.svg"
+    )
+    multi_gap_fraction_density = (
+        args.out_dir / f"{prefix}.multi_query_gap_fraction_density.svg"
+    )
     category_counts = args.out_dir / f"{prefix}.orthology_category_counts.svg"
     sequence_by_category = (
         args.out_dir / f"{prefix}.orthology_sequence_identity_density.svg"
@@ -66,6 +78,13 @@ def main(argv: list[str] | None = None) -> None:
         alignment_histogram,
         overlap_density,
         sequence_identity_density,
+    )
+    gap_fraction_n = write_gap_fraction_density(args.stats, gap_fraction_density)
+    multi_result = write_multi_alignment_metric_densities(
+        args.summary,
+        args.stats,
+        multi_sequence_identity_density,
+        multi_gap_fraction_density,
     )
     diagnostic_result = write_orthology_diagnostic_plots(
         args.stats,
@@ -80,6 +99,22 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Wrote alignment histogram -> {qc_result.histogram_path}")
     print(f"Wrote overlap density -> {qc_result.overlap_density_path}")
     print(f"Wrote sequence identity density -> {qc_result.sequence_identity_density_path}")
+    print(
+        f"Wrote gap fraction density for {gap_fraction_n} candidate projections -> "
+        f"{gap_fraction_density}"
+    )
+    print(
+        "Wrote multi-query sequence identity density for "
+        f"{multi_result.sequence_identity_density_n} projections from "
+        f"{multi_result.multi_alignment_ref_count} refs -> "
+        f"{multi_result.sequence_identity_density_path}"
+    )
+    print(
+        "Wrote multi-query gap fraction density for "
+        f"{multi_result.gap_fraction_density_n} candidate projections from "
+        f"{multi_result.multi_alignment_ref_count} refs -> "
+        f"{multi_result.gap_fraction_density_path}"
+    )
     print(f"Wrote orthology category counts -> {diagnostic_result.category_counts_path}")
     print(
         "Wrote sequence identity by category -> "

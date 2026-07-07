@@ -52,7 +52,7 @@ Tab separated list:
 
 # Orthology flowchart
 
-"Solid" match for ref vs query projection = sequence identity > 0.7 AND gap fraction < 0.9.
+"Solid" match for ref vs query projection = sequence identity > 0.7 AND gap fraction < 0.1.
 If genome FASTAs are not provided, sequence identity is unavailable and the
 solid-match decision uses gap fraction only.
 

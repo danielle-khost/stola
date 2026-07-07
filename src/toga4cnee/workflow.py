@@ -38,7 +38,7 @@ def run_workflow(
     query_fasta: str | Path | None = None,
     flank_size: int = 1000,
     min_sequence_identity: float = 0.7,
-    max_fraction_gap: float = 0.9,
+    max_fraction_gap: float = 0.1,
     work_dir: str | Path | None = None,
 ) -> WorkflowResult:
     """Run indexing, candidate discovery, overlap stats, and query BED export."""

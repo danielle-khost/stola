@@ -85,7 +85,7 @@ def classify_orthology(
     out_orthology: str | Path,
     out_query_bed: str | Path,
     min_sequence_identity: float = 0.7,
-    max_fraction_gap: float = 0.9,
+    max_fraction_gap: float = 0.1,
 ) -> OrthologyResult:
     """Classify query CNEE loci from overlap stats and write TSV/BED outputs."""
     # Build graph evidence, filter solid edges, and write orthology calls.

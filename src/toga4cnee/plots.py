@@ -46,6 +46,15 @@ class OrthologyDiagnosticPlotResult:
     gap_fraction_counts: dict[str, int]
 
 
+@dataclass(frozen=True)
+class MultiAlignmentMetricPlotResult:
+    sequence_identity_density_path: Path
+    gap_fraction_density_path: Path
+    multi_alignment_ref_count: int
+    sequence_identity_density_n: int
+    gap_fraction_density_n: int
+
+
 def write_qc_plots(
     summary_path: str | Path,
     stats_path: str | Path,
@@ -76,7 +85,7 @@ def write_orthology_diagnostic_plots(
     sequence_identity_by_category_path: str | Path,
     gap_fraction_by_category_path: str | Path,
     min_sequence_identity: float = 0.7,
-    max_fraction_gap: float = 0.9,
+    max_fraction_gap: float = 0.1,
 ) -> OrthologyDiagnosticPlotResult:
     # Write category counts plus grouped sequence-identity/gap-fraction densities.
     category_counts = write_orthology_category_counts(
@@ -209,37 +218,134 @@ def write_overlap_density(
 
 
 def write_sequence_identity_density(
-    stats_path: str | Path, out_path: str | Path, bins: int = 100
+    stats_path: str | Path,
+    out_path: str | Path,
+    bins: int = 100,
+    ref_ids: set[str] | None = None,
+    title: str = "Sequence identity density",
+    subtitle_label: str = "Sequence-compared projections",
 ) -> int:
     # Plot a smoothed density of sequence identities when sequence metrics exist.
     counts = [0 for _ in range(bins)]
     total = 0
     with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        if "seq_identity" not in (reader.fieldnames or []):
-            total = 0
-        else:
-            for row in reader:
-                value_text = row["seq_identity"]
-                if value_text == ".":
-                    continue
-                value = min(1.0, max(0.0, float(value_text)))
-                index = min(bins - 1, int(value * bins))
-                counts[index] += 1
-                total += 1
+        required = {"cnee_id", "seq_identity"} if ref_ids is not None else {"seq_identity"}
+        missing = sorted(required.difference(reader.fieldnames or []))
+        if missing:
+            raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
+        for row in reader:
+            if ref_ids is not None and row["cnee_id"] not in ref_ids:
+                continue
+            value_text = row["seq_identity"]
+            if value_text == ".":
+                continue
+            value = min(1.0, max(0.0, float(value_text)))
+            index = min(bins - 1, int(value * bins))
+            counts[index] += 1
+            total += 1
 
     bin_width = 1.0 / bins
     densities = [count / (total * bin_width) if total else 0.0 for count in counts]
     smoothed = _moving_average(densities, radius=2)
     svg = _density_svg(
-        title="Sequence identity density",
-        subtitle=f"Sequence-compared projections: {total}",
+        title=title,
+        subtitle=f"{subtitle_label}: {total}",
         x_label="Sequence identity",
         y_label="Density",
         values=smoothed,
     )
     Path(out_path).write_text(svg, encoding="utf-8")
     return total
+
+
+def write_gap_fraction_density(
+    stats_path: str | Path,
+    out_path: str | Path,
+    bins: int = 100,
+    ref_ids: set[str] | None = None,
+    title: str = "Gap fraction density",
+    subtitle_label: str = "Candidate projections",
+) -> int:
+    # Plot a smoothed density of chain-span gap fractions for candidate rows.
+    counts = [0 for _ in range(bins)]
+    total = 0
+    with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = (
+            {"cnee_id", "gap_fraction_within_chain_span"}
+            if ref_ids is not None
+            else {"gap_fraction_within_chain_span"}
+        )
+        missing = sorted(required.difference(reader.fieldnames or []))
+        if missing:
+            raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
+        for row in reader:
+            if ref_ids is not None and row["cnee_id"] not in ref_ids:
+                continue
+            value = min(1.0, max(0.0, float(row["gap_fraction_within_chain_span"])))
+            index = min(bins - 1, int(value * bins))
+            counts[index] += 1
+            total += 1
+
+    bin_width = 1.0 / bins
+    densities = [count / (total * bin_width) if total else 0.0 for count in counts]
+    smoothed = _moving_average(densities, radius=2)
+    svg = _density_svg(
+        title=title,
+        subtitle=f"{subtitle_label}: {total}",
+        x_label="Gap fraction",
+        y_label="Density",
+        values=smoothed,
+    )
+    Path(out_path).write_text(svg, encoding="utf-8")
+    return total
+
+
+def write_multi_alignment_metric_densities(
+    summary_path: str | Path,
+    stats_path: str | Path,
+    sequence_identity_path: str | Path,
+    gap_fraction_path: str | Path,
+) -> MultiAlignmentMetricPlotResult:
+    # Plot sequence/gap metrics only for refs with more than one query alignment.
+    ref_ids = _read_multi_alignment_ref_ids(summary_path)
+    seq_n = write_sequence_identity_density(
+        stats_path,
+        sequence_identity_path,
+        ref_ids=ref_ids,
+        title="Sequence identity density for multi-query CNEEs",
+        subtitle_label="Sequence-compared projections from refs with >1 query alignment",
+    )
+    gap_n = write_gap_fraction_density(
+        stats_path,
+        gap_fraction_path,
+        ref_ids=ref_ids,
+        title="Gap fraction density for multi-query CNEEs",
+        subtitle_label="Candidate projections from refs with >1 query alignment",
+    )
+    return MultiAlignmentMetricPlotResult(
+        sequence_identity_density_path=Path(sequence_identity_path),
+        gap_fraction_density_path=Path(gap_fraction_path),
+        multi_alignment_ref_count=len(ref_ids),
+        sequence_identity_density_n=seq_n,
+        gap_fraction_density_n=gap_n,
+    )
+
+
+def _read_multi_alignment_ref_ids(summary_path: str | Path) -> set[str]:
+    # Read summary rows whose reference CNEE has more than one query alignment.
+    ref_ids: set[str] = set()
+    with Path(summary_path).open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {"cnee_id", "num_query_alignments"}
+        missing = sorted(required.difference(reader.fieldnames or []))
+        if missing:
+            raise ValueError(f"Summary file is missing columns: {', '.join(missing)}")
+        for row in reader:
+            if int(row["num_query_alignments"]) > 1:
+                ref_ids.add(row["cnee_id"])
+    return ref_ids
 
 
 def _collect_orthology_metric_values(

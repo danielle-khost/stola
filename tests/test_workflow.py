@@ -260,12 +260,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.chain_count, 3)
         self.assertEqual(result.candidate_count, 3)
         self.assertEqual(result.stats_count, 3)
-        self.assertEqual(result.query_bed_count, 2)
+        self.assertEqual(result.query_bed_count, 1)
         self.assertEqual(result.summary_count, 3)
-        self.assertEqual(result.orthology_result.orthology_rows, 4)
+        self.assertEqual(result.orthology_result.orthology_rows, 3)
         self.assertEqual(len(stats_rows), 3)
         self.assertEqual(len(summary_rows), 3)
-        self.assertEqual(len(orthology_rows), 4)
+        self.assertEqual(len(orthology_rows), 3)
         self.assertEqual(
             list(orthology_rows[0]),
             ["query_cnee_id", "partner_ref_cnees", "orthology_category"],
@@ -273,15 +273,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(
             bed_lines,
             [
-                "chrQ\t520\t590\tq_CNEE_PARTIAL_1\t0\t+",
-                "chrQ2\t770\t890\tq_CNEE_PARTIAL_2\t0\t-",
+                "chrQ2\t770\t890\tq_CNEE_PARTIAL\t0\t-",
             ],
         )
         categories = {
             row["query_cnee_id"]: row["orthology_category"] for row in orthology_rows
         }
-        self.assertEqual(categories["q_CNEE_PARTIAL_1"], "one2many")
-        self.assertEqual(categories["q_CNEE_PARTIAL_2"], "one2many")
+        self.assertEqual(categories["q_CNEE_PARTIAL"], "one2one")
         na_categories = {
             row["partner_ref_cnees"]: row["orthology_category"]
             for row in orthology_rows
@@ -384,8 +382,8 @@ class WorkflowTests(unittest.TestCase):
                     ]
                 )
                 + "\n"
-                + "CNEE_SOLID\t50\tchrQ\t+\t100\t150\tS#1\t0.2\t0.8\n"
-                + "CNEE_SEQ_MISSING\t50\tchrQ\t+\t300\t350\tM#1\t0.2\t.\n"
+                + "CNEE_SOLID\t50\tchrQ\t+\t100\t150\tS#1\t0.05\t0.8\n"
+                + "CNEE_SEQ_MISSING\t50\tchrQ\t+\t300\t350\tM#1\t0.05\t.\n"
                 + "CNEE_NONSOLID\t50\tchrQ\t+\t500\t550\tN#1\t0.2\t0.5\n"
                 + "CNEE_GAP_ONLY\t0\tchrQ\t+\t.\t.\tG#1\t1.0\t.\n",
                 encoding="utf-8",
@@ -397,7 +395,7 @@ class WorkflowTests(unittest.TestCase):
                 orthology,
                 query_bed,
                 min_sequence_identity=0.7,
-                max_fraction_gap=0.9,
+                max_fraction_gap=0.1,
             )
             rows = _read_tsv(orthology)
             bed_lines = query_bed.read_text(encoding="utf-8").splitlines()
@@ -445,7 +443,7 @@ class WorkflowTests(unittest.TestCase):
                     ]
                 )
                 + "\n"
-                + "CNEE_SOLID\t50\t0.2\t0.8\n"
+                + "CNEE_SOLID\t50\t0.05\t0.8\n"
                 + "CNEE_NONSOLID\t50\t0.2\t0.5\n"
                 + "CNEE_LOST\t0\t1.0\t.\n",
                 encoding="utf-8",
@@ -472,7 +470,7 @@ class WorkflowTests(unittest.TestCase):
                 seq_plot,
                 gap_plot,
                 min_sequence_identity=0.7,
-                max_fraction_gap=0.9,
+                max_fraction_gap=0.1,
             )
             category_text = category_plot.read_text(encoding="utf-8")
             seq_text = seq_plot.read_text(encoding="utf-8")
@@ -487,6 +485,46 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Orthology category counts", category_text)
         self.assertIn("Sequence identity by orthology category", seq_text)
         self.assertIn("Gap fraction by orthology category", gap_text)
+
+    def test_multi_alignment_metric_plots_filter_by_summary_counts(self) -> None:
+        from toga4cnee.plots import write_multi_alignment_metric_densities
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            summary = tmp_path / "summary.tsv"
+            stats = tmp_path / "stats.tsv"
+            seq_plot = tmp_path / "multi_seq.svg"
+            gap_plot = tmp_path / "multi_gap.svg"
+            summary.write_text(
+                "cnee_id\tnum_query_alignments\n"
+                "CNEE_SINGLE\t1\n"
+                "CNEE_MULTI\t2\n"
+                "CNEE_ZERO\t0\n",
+                encoding="utf-8",
+            )
+            stats.write_text(
+                "cnee_id\tgap_fraction_within_chain_span\tseq_identity\n"
+                "CNEE_SINGLE\t0.05\t0.9\n"
+                "CNEE_MULTI\t0.1\t0.8\n"
+                "CNEE_MULTI\t0.4\t.\n"
+                "CNEE_ZERO\t1.0\t.\n",
+                encoding="utf-8",
+            )
+
+            result = write_multi_alignment_metric_densities(
+                summary,
+                stats,
+                seq_plot,
+                gap_plot,
+            )
+            seq_text = seq_plot.read_text(encoding="utf-8")
+            gap_text = gap_plot.read_text(encoding="utf-8")
+
+        self.assertEqual(result.multi_alignment_ref_count, 1)
+        self.assertEqual(result.sequence_identity_density_n, 1)
+        self.assertEqual(result.gap_fraction_density_n, 2)
+        self.assertIn("Sequence identity density for multi-query CNEEs", seq_text)
+        self.assertIn("Gap fraction density for multi-query CNEEs", gap_text)
 
     def test_sequence_comparison_metrics_for_plus_strand_projection(self) -> None:
         try:

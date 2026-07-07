@@ -24,7 +24,7 @@ separately from completed outputs.
 The current orthology pass draws an edge for every aligned query projection,
 stores `sequence_identity` and `fraction_gap` on that edge, then classifies the
 connected components formed by solid edges. By default, a solid edge has
-`fraction_gap < 0.9`; when FASTAs are supplied it must also have
+`fraction_gap < 0.1`; when FASTAs are supplied it must also have
 `sequence_identity > 0.7`. Tune these with `--max-fraction-gap` and
 `--min-sequence-identity`. Categories are `one2one`, `one2many`, `many2one`,
 `lost`, `missing`, `uncertain_loss`, or the catch-all `complex/many2many`. The
