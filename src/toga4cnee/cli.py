@@ -30,6 +30,10 @@ def _run(args: argparse.Namespace) -> None:
         args.out_stats,
         out_summary=out_summary,
         out_orthology=out_orthology,
+        out_strict_bed=args.out_strict_bed,
+        out_strict_stats=args.out_strict_stats,
+        out_strict_summary=args.out_strict_summary,
+        out_strict_orthology=args.out_strict_orthology,
         ref_fasta=args.ref_fasta,
         query_fasta=args.query_fasta,
         flank_size=args.flank_size,
@@ -38,13 +42,29 @@ def _run(args: argparse.Namespace) -> None:
         work_dir=args.work_dir,
     )
     print(f"Indexed {result.chain_count} chains")
-    print(f"Wrote {result.stats_count} overlap-stat rows -> {args.out_stats}")
-    print(f"Wrote {result.query_bed_count} query CNEE BED rows -> {args.out_bed}")
+    print(f"Wrote {result.stats_count} all overlap-stat rows -> {args.out_stats}")
     print(
-        f"Wrote {result.orthology_result.orthology_rows} orthology rows -> "
+        f"Wrote {result.strict_stats_count} strict overlap-stat rows -> "
+        f"{result.strict_stats_path}"
+    )
+    print(f"Wrote {result.query_bed_count} all query CNEE BED rows -> {args.out_bed}")
+    print(
+        f"Wrote {result.strict_query_bed_count} strict query CNEE BED rows -> "
+        f"{result.strict_bed_path}"
+    )
+    print(
+        f"Wrote {result.orthology_result.orthology_rows} all orthology rows -> "
         f"{out_orthology}"
     )
-    print(f"Wrote {result.summary_count} CNEE summary rows -> {out_summary}")
+    print(
+        f"Wrote {result.strict_orthology_result.orthology_rows} strict orthology rows -> "
+        f"{result.strict_orthology_path}"
+    )
+    print(f"Wrote {result.summary_count} all CNEE summary rows -> {out_summary}")
+    print(
+        f"Wrote {result.strict_summary_count} strict CNEE summary rows -> "
+        f"{result.strict_summary_path}"
+    )
     if args.work_dir is not None:
         print(f"Kept intermediates in {args.work_dir}")
 
@@ -117,6 +137,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Graph-based orthology classification TSV [default: OUT_STATS with .orthology.tsv suffix]",
+    )
+    run_parser.add_argument(
+        "--out-strict-bed",
+        type=Path,
+        default=None,
+        help="Strict query CNEE BED [default: OUT_BED with .strict before extension]",
+    )
+    run_parser.add_argument(
+        "--out-strict-stats",
+        type=Path,
+        default=None,
+        help="Strict solid-only overlap stats TSV [default: OUT_STATS with .strict before extension]",
+    )
+    run_parser.add_argument(
+        "--out-strict-summary",
+        type=Path,
+        default=None,
+        help="Strict per-reference-CNEE summary TSV [default: OUT_STATS with .strict.summary before extension]",
+    )
+    run_parser.add_argument(
+        "--out-strict-orthology",
+        type=Path,
+        default=None,
+        help="Strict graph-based orthology TSV [default: OUT_STATS with .strict.orthology before extension]",
     )
     run_parser.add_argument("--flank-size", type=int, default=1000)
     run_parser.add_argument(

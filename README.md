@@ -14,20 +14,25 @@ toga4cnee alignment.chain.gz reference_cnees.bed \
 ```
 
 The command indexes the chain file, finds candidate chain/CNEE pairs, computes
-overlap statistics for every candidate, clusters overlapping query-side
-projections into graph-assigned query CNEEs, writes those query CNEEs to BED,
-writes graph-based orthology calls at `overlap_stats.orthology.tsv`, writes a
-concise summary at `overlap_stats.summary.tsv`. Use `--work-dir` to keep
-intermediate index and candidate TSV files. Diagnostic figures are generated
-separately from completed outputs.
+overlap statistics for every candidate, writes an all-output BED/orthology TSV,
+writes strict companion outputs, and writes concise summaries. The requested
+`--out-bed`, `--out-stats`, `--out-summary`, and `--out-orthology` paths are
+the all outputs. Strict outputs are written by default as `.strict` companions,
+for example `query_cnees.strict.bed`, `overlap_stats.strict.tsv`,
+`overlap_stats.strict.summary.tsv`, and `overlap_stats.strict.orthology.tsv`.
+Use `--work-dir` to keep intermediate index and candidate TSV files.
+Diagnostic figures are generated separately from completed outputs.
 
 The current orthology pass draws an edge for every aligned query projection,
-stores `sequence_identity` and `fraction_gap` on that edge, then classifies the
-connected components formed by solid edges. By default, a solid edge has
-`fraction_gap < 0.1`; when FASTAs are supplied it must also have
-`sequence_identity > 0.7`. Tune these with `--max-fraction-gap` and
-`--min-sequence-identity`. Categories are `one2one`, `one2many`, `many2one`,
-`lost`, `missing`, `uncertain_loss`, or the catch-all `complex/many2many`. The
+stores `sequence_identity` and `fraction_gap` on that edge, and classifies graph
+components. By default, a solid edge has `fraction_gap < 0.1`; when FASTAs are
+supplied it must also have `sequence_identity > 0.7`. Tune these with
+`--max-fraction-gap` and `--min-sequence-identity`. All output keeps every
+aligned query projection for a reference CNEE that has at least one solid
+projection. Strict output keeps only solid projections; references with weak
+aligned projections but no solid projection are retained as `uncertain_loss` in
+both modes. Categories are `one2one`, `one2many`, `many2one`, `lost`,
+`missing`, `uncertain_loss`, or the catch-all `complex/many2many`. The
 orthology TSV has three columns: `query_cnee_id`, `partner_ref_cnees`, and
 `orthology_category`; non-query reference outcomes are written with `NA` as the
 query ID.

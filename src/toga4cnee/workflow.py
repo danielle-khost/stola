@@ -12,7 +12,7 @@ from .index import build_index
 from .orthology import OrthologyResult, classify_orthology
 from .overlap import OVERLAP_COLUMNS, iter_overlap_rows
 from .sequence_compare import SequenceComparator
-from .summary import summarize_overlap_stats
+from .summary import stats_row_is_solid, summarize_overlap_stats
 
 
 @dataclass(frozen=True)
@@ -20,11 +20,19 @@ class WorkflowResult:
     chain_count: int
     candidate_count: int
     stats_count: int
+    strict_stats_count: int
     query_bed_count: int
+    strict_query_bed_count: int
     summary_count: int
+    strict_summary_count: int
     orthology_result: OrthologyResult
+    strict_orthology_result: OrthologyResult
     index_path: Path
     candidates_path: Path
+    strict_stats_path: Path
+    strict_summary_path: Path
+    strict_bed_path: Path
+    strict_orthology_path: Path
 
 
 def run_workflow(
@@ -34,6 +42,10 @@ def run_workflow(
     out_stats: str | Path,
     out_summary: str | Path | None = None,
     out_orthology: str | Path | None = None,
+    out_strict_bed: str | Path | None = None,
+    out_strict_stats: str | Path | None = None,
+    out_strict_summary: str | Path | None = None,
+    out_strict_orthology: str | Path | None = None,
     ref_fasta: str | Path | None = None,
     query_fasta: str | Path | None = None,
     flank_size: int = 1000,
@@ -58,10 +70,34 @@ def run_workflow(
         if out_orthology is not None
         else out_stats.with_suffix(".orthology.tsv")
     )
+    out_strict_bed_path = (
+        Path(out_strict_bed)
+        if out_strict_bed is not None
+        else _add_suffix_before_extension(out_bed, ".strict")
+    )
+    out_strict_stats_path = (
+        Path(out_strict_stats)
+        if out_strict_stats is not None
+        else _add_suffix_before_extension(out_stats, ".strict")
+    )
+    out_strict_summary_path = (
+        Path(out_strict_summary)
+        if out_strict_summary is not None
+        else _add_suffix_before_extension(out_stats, ".strict.summary")
+    )
+    out_strict_orthology_path = (
+        Path(out_strict_orthology)
+        if out_strict_orthology is not None
+        else _add_suffix_before_extension(out_stats, ".strict.orthology")
+    )
     out_bed.parent.mkdir(parents=True, exist_ok=True)
     out_stats.parent.mkdir(parents=True, exist_ok=True)
     out_summary_path.parent.mkdir(parents=True, exist_ok=True)
     out_orthology_path.parent.mkdir(parents=True, exist_ok=True)
+    out_strict_bed_path.parent.mkdir(parents=True, exist_ok=True)
+    out_strict_stats_path.parent.mkdir(parents=True, exist_ok=True)
+    out_strict_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    out_strict_orthology_path.parent.mkdir(parents=True, exist_ok=True)
 
     if work_dir is None:
         with tempfile.TemporaryDirectory(prefix="toga4cnee_") as tmpdir:
@@ -72,6 +108,10 @@ def run_workflow(
                 out_stats,
                 out_summary_path,
                 out_orthology_path,
+                out_strict_bed_path,
+                out_strict_stats_path,
+                out_strict_summary_path,
+                out_strict_orthology_path,
                 ref_fasta,
                 query_fasta,
                 flank_size,
@@ -89,6 +129,10 @@ def run_workflow(
         out_stats,
         out_summary_path,
         out_orthology_path,
+        out_strict_bed_path,
+        out_strict_stats_path,
+        out_strict_summary_path,
+        out_strict_orthology_path,
         ref_fasta,
         query_fasta,
         flank_size,
@@ -105,6 +149,10 @@ def _run_workflow_in_dir(
     out_stats: Path,
     out_summary: Path,
     out_orthology: Path,
+    out_strict_bed: Path,
+    out_strict_stats: Path,
+    out_strict_summary: Path,
+    out_strict_orthology: Path,
     ref_fasta: str | Path | None,
     query_fasta: str | Path | None,
     flank_size: int,
@@ -141,18 +189,57 @@ def _run_workflow_in_dir(
         out_bed,
         min_sequence_identity=min_sequence_identity,
         max_fraction_gap=max_fraction_gap,
+        output_mode="all",
     )
-    summary_count = summarize_overlap_stats(out_stats, out_summary, cnee_bed=cnee_bed)
+    strict_orthology_result = classify_orthology(
+        out_stats,
+        cnee_bed,
+        out_strict_orthology,
+        out_strict_bed,
+        min_sequence_identity=min_sequence_identity,
+        max_fraction_gap=max_fraction_gap,
+        output_mode="strict",
+    )
+    summary_count = summarize_overlap_stats(
+        out_stats,
+        out_summary,
+        cnee_bed=cnee_bed,
+        require_solid_reference=True,
+        min_sequence_identity=min_sequence_identity,
+        max_fraction_gap=max_fraction_gap,
+    )
+    strict_stats_count = _write_strict_stats(
+        out_stats,
+        out_strict_stats,
+        min_sequence_identity=min_sequence_identity,
+        max_fraction_gap=max_fraction_gap,
+    )
+    strict_summary_count = summarize_overlap_stats(
+        out_stats,
+        out_strict_summary,
+        cnee_bed=cnee_bed,
+        solid_only=True,
+        min_sequence_identity=min_sequence_identity,
+        max_fraction_gap=max_fraction_gap,
+    )
 
     return WorkflowResult(
         chain_count=int(index_payload["chain_count"]),
         candidate_count=candidate_count,
         stats_count=stats_count,
+        strict_stats_count=strict_stats_count,
         query_bed_count=orthology_result.query_bed_rows,
+        strict_query_bed_count=strict_orthology_result.query_bed_rows,
         summary_count=summary_count,
+        strict_summary_count=strict_summary_count,
         orthology_result=orthology_result,
+        strict_orthology_result=strict_orthology_result,
         index_path=index_path,
         candidates_path=candidates_path,
+        strict_stats_path=out_strict_stats,
+        strict_summary_path=out_strict_summary,
+        strict_bed_path=out_strict_bed,
+        strict_orthology_path=out_strict_orthology,
     )
 
 
@@ -178,3 +265,38 @@ def _write_stats(
             writer.writerow(row)
             stats_count += 1
     return stats_count
+
+
+def _write_strict_stats(
+    stats_path: Path,
+    out_stats: Path,
+    min_sequence_identity: float,
+    max_fraction_gap: float,
+) -> int:
+    # Write a filtered overlap-stats TSV containing only solid candidate rows.
+    count = 0
+    with stats_path.open("r", encoding="utf-8", newline="") as in_handle:
+        reader = csv.DictReader(in_handle, delimiter="\t")
+        with out_stats.open("w", encoding="utf-8", newline="") as out_handle:
+            writer = csv.DictWriter(
+                out_handle,
+                fieldnames=reader.fieldnames or OVERLAP_COLUMNS,
+                delimiter="\t",
+                lineterminator="\n",
+            )
+            writer.writeheader()
+            for row in reader:
+                if not stats_row_is_solid(
+                    row,
+                    min_sequence_identity=min_sequence_identity,
+                    max_fraction_gap=max_fraction_gap,
+                ):
+                    continue
+                writer.writerow(row)
+                count += 1
+    return count
+
+
+def _add_suffix_before_extension(path: Path, suffix: str) -> Path:
+    # Insert a logical suffix before the final file extension.
+    return path.with_name(f"{path.stem}{suffix}{path.suffix}")

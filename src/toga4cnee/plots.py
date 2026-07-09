@@ -516,6 +516,8 @@ def _svg_header(width: int, height: int) -> str:
         ".grid{stroke:#d9e2ec;stroke-width:1}"
         ".label{font-size:13px}"
         ".tick{font-size:11px;fill:#52606d}"
+        ".table-header{font-size:12px;font-weight:700;fill:#1f2933}"
+        ".table-text{font-size:11px;fill:#1f2933}"
         "</style>\n"
     )
 
@@ -528,9 +530,12 @@ def _bar_svg(
     labels: list[str],
     counts: list[int],
 ) -> str:
-    # Render a labeled bar chart as a standalone SVG string.
-    width, height = 900, 520
-    left, right, top, bottom = 80, 35, 75, 80
+    # Render a labeled bar chart and a compact count table as standalone SVG.
+    width, height = 1120, 540
+    left, right, top, bottom = 80, 255, 75, 92
+    table_left = width - right + 32
+    table_top = top + 2
+    table_width = right - 55
     plot_width = width - left - right
     plot_height = height - top - bottom
     max_count = max(counts) if counts else 0
@@ -580,6 +585,36 @@ def _bar_svg(
     parts.append(
         f'<text class="label" transform="translate(22 {top + plot_height / 2}) rotate(-90)" '
         f'text-anchor="middle">{html.escape(y_label)}</text>\n'
+    )
+    parts.append(
+        f'<rect x="{table_left - 14}" y="{table_top - 22}" '
+        f'width="{table_width}" height="{plot_height + 48}" '
+        'fill="#f8fafc" stroke="#d9e2ec" stroke-width="1"/>\n'
+    )
+    parts.append(
+        f'<text class="table-header" x="{table_left}" y="{table_top}">Counts</text>\n'
+    )
+    row_y = table_top + 22
+    for label, count in zip(labels, counts):
+        parts.append(
+            f'<text class="table-text" x="{table_left}" y="{row_y}">'
+            f'{html.escape(label)}</text>\n'
+        )
+        parts.append(
+            f'<text class="table-text" x="{width - 36}" y="{row_y}" text-anchor="end">'
+            f'{count:,}</text>\n'
+        )
+        row_y += 18
+    parts.append(
+        f'<line x1="{table_left}" y1="{row_y - 8}" x2="{width - 36}" '
+        f'y2="{row_y - 8}" stroke="#d9e2ec" stroke-width="1"/>\n'
+    )
+    parts.append(
+        f'<text class="table-header" x="{table_left}" y="{row_y + 8}">Total</text>\n'
+    )
+    parts.append(
+        f'<text class="table-header" x="{width - 36}" y="{row_y + 8}" '
+        f'text-anchor="end">{sum(counts):,}</text>\n'
     )
     parts.append("</svg>\n")
     return "".join(parts)

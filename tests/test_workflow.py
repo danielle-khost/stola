@@ -230,6 +230,45 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(rows[2]["projection_status"], "missing")
         self.assertEqual(rows[2]["num_query_alignments"], "0")
 
+    def test_solid_aware_summary_marks_weak_only_refs_uncertain_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bed = tmp_path / "cnees.bed"
+            stats = tmp_path / "stats.tsv"
+            summary = tmp_path / "summary.tsv"
+            bed.write_text(
+                "chr1\t0\t50\tCNEE_SOLID_PLUS_WEAK\n"
+                "chr1\t100\t150\tCNEE_WEAK_ONLY\n",
+                encoding="utf-8",
+            )
+            stats.write_text(
+                "cnee_id\taligned_bases\tcovered_fraction\t"
+                "gap_bases_within_chain_span\tgap_fraction_within_chain_span\t"
+                "seq_identity\n"
+                "CNEE_SOLID_PLUS_WEAK\t50\t1.0\t0\t0.05\t0.8\n"
+                "CNEE_SOLID_PLUS_WEAK\t25\t0.5\t25\t0.5\t0.8\n"
+                "CNEE_WEAK_ONLY\t25\t0.5\t25\t0.5\t0.8\n",
+                encoding="utf-8",
+            )
+
+            count = summarize_overlap_stats(
+                stats,
+                summary,
+                cnee_bed=bed,
+                require_solid_reference=True,
+                min_sequence_identity=0.7,
+                max_fraction_gap=0.1,
+            )
+            rows = {row["cnee_id"]: row for row in _read_tsv(summary)}
+
+        self.assertEqual(count, 2)
+        self.assertEqual(rows["CNEE_SOLID_PLUS_WEAK"]["projection_status"], "aligned")
+        self.assertEqual(rows["CNEE_SOLID_PLUS_WEAK"]["num_query_alignments"], "2")
+        self.assertEqual(rows["CNEE_SOLID_PLUS_WEAK"]["overlap_fractions"], "1.0,0.5")
+        self.assertEqual(rows["CNEE_WEAK_ONLY"]["projection_status"], "uncertain_loss")
+        self.assertEqual(rows["CNEE_WEAK_ONLY"]["num_query_alignments"], "0")
+        self.assertEqual(rows["CNEE_WEAK_ONLY"]["overlap_fractions"], "")
+
     def test_single_workflow_writes_stats_and_query_bed(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
@@ -256,16 +295,33 @@ class WorkflowTests(unittest.TestCase):
             bed_lines = query_bed.read_text(encoding="utf-8").splitlines()
             summary_rows = _read_tsv(summary)
             orthology_rows = _read_tsv(orthology)
+            strict_stats_rows = _read_tsv(tmp_path / "overlap_stats.strict.tsv")
+            strict_bed_lines = (tmp_path / "query_cnees.strict.bed").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            strict_summary_rows = _read_tsv(
+                tmp_path / "overlap_stats.strict.summary.tsv"
+            )
+            strict_orthology_rows = _read_tsv(
+                tmp_path / "overlap_stats.strict.orthology.tsv"
+            )
 
         self.assertEqual(result.chain_count, 3)
         self.assertEqual(result.candidate_count, 3)
         self.assertEqual(result.stats_count, 3)
-        self.assertEqual(result.query_bed_count, 1)
+        self.assertEqual(result.strict_stats_count, 1)
+        self.assertEqual(result.query_bed_count, 2)
+        self.assertEqual(result.strict_query_bed_count, 1)
         self.assertEqual(result.summary_count, 3)
-        self.assertEqual(result.orthology_result.orthology_rows, 3)
+        self.assertEqual(result.strict_summary_count, 3)
+        self.assertEqual(result.orthology_result.orthology_rows, 4)
+        self.assertEqual(result.strict_orthology_result.orthology_rows, 3)
         self.assertEqual(len(stats_rows), 3)
+        self.assertEqual(len(strict_stats_rows), 1)
         self.assertEqual(len(summary_rows), 3)
-        self.assertEqual(len(orthology_rows), 3)
+        self.assertEqual(len(strict_summary_rows), 3)
+        self.assertEqual(len(orthology_rows), 4)
+        self.assertEqual(len(strict_orthology_rows), 3)
         self.assertEqual(
             list(orthology_rows[0]),
             ["query_cnee_id", "partner_ref_cnees", "orthology_category"],
@@ -273,13 +329,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(
             bed_lines,
             [
+                "chrQ\t520\t590\tq_CNEE_PARTIAL_1\t0\t+",
+                "chrQ2\t770\t890\tq_CNEE_PARTIAL_2\t0\t-",
+            ],
+        )
+        self.assertEqual(
+            strict_bed_lines,
+            [
                 "chrQ2\t770\t890\tq_CNEE_PARTIAL\t0\t-",
             ],
         )
         categories = {
             row["query_cnee_id"]: row["orthology_category"] for row in orthology_rows
         }
-        self.assertEqual(categories["q_CNEE_PARTIAL"], "one2one")
+        self.assertEqual(categories["q_CNEE_PARTIAL_1"], "one2many")
+        self.assertEqual(categories["q_CNEE_PARTIAL_2"], "one2many")
+        strict_categories = {
+            row["query_cnee_id"]: row["orthology_category"]
+            for row in strict_orthology_rows
+        }
+        self.assertEqual(strict_categories["q_CNEE_PARTIAL"], "one2one")
         na_categories = {
             row["partner_ref_cnees"]: row["orthology_category"]
             for row in orthology_rows
@@ -292,6 +361,13 @@ class WorkflowTests(unittest.TestCase):
         }
         self.assertEqual(summary_statuses["CNEE_GAPPED"], "lost")
         self.assertEqual(summary_statuses["CNEE_NO_CHAIN"], "missing")
+        strict_summary_by_id = {
+            row["cnee_id"]: row for row in strict_summary_rows
+        }
+        self.assertEqual(
+            strict_summary_by_id["CNEE_PARTIAL"]["num_query_alignments"], "1"
+        )
+        self.assertEqual(strict_summary_by_id["CNEE_PARTIAL"]["projection_status"], "aligned")
 
     def test_orthology_graph_edges_store_sequence_identity_and_gap_fraction(self) -> None:
         if not _has_networkx():

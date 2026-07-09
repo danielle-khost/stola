@@ -86,6 +86,7 @@ def classify_orthology(
     out_query_bed: str | Path,
     min_sequence_identity: float = 0.7,
     max_fraction_gap: float = 0.1,
+    output_mode: str = "strict",
 ) -> OrthologyResult:
     """Classify query CNEE loci from overlap stats and write TSV/BED outputs."""
     # Build graph evidence, filter solid edges, and write orthology calls.
@@ -93,6 +94,8 @@ def classify_orthology(
         raise ValueError("min_sequence_identity must be between 0 and 1")
     if max_fraction_gap < 0 or max_fraction_gap > 1:
         raise ValueError("max_fraction_gap must be between 0 and 1")
+    if output_mode not in {"all", "strict"}:
+        raise ValueError("output_mode must be 'all' or 'strict'")
     try:
         import networkx as nx
     except ImportError as exc:
@@ -103,21 +106,36 @@ def classify_orthology(
 
     ref_ids = [interval.cnee_id for interval in parse_bed(cnee_bed)]
     evidence = _read_projection_evidence(stats_path)
-    projections = evidence.projections
-    clusters = _cluster_query_projections(projections)
-
-    graph = _build_orthology_graph(nx, ref_ids, clusters)
-    solid_graph = _build_solid_graph(
+    all_clusters = _cluster_query_projections(evidence.projections)
+    all_graph = _build_orthology_graph(nx, ref_ids, all_clusters)
+    all_solid_graph = _build_solid_graph(
         nx,
-        graph,
+        all_graph,
         min_sequence_identity=min_sequence_identity,
         max_fraction_gap=max_fraction_gap,
     )
-    components = [set(component) for component in nx.connected_components(solid_graph)]
+    if output_mode == "strict":
+        projections = [
+            projection
+            for projection in evidence.projections
+            if _projection_is_solid(
+                projection,
+                min_sequence_identity=min_sequence_identity,
+                max_fraction_gap=max_fraction_gap,
+            )
+        ]
+        clusters = _cluster_query_projections(projections)
+        graph = _build_orthology_graph(nx, ref_ids, clusters)
+    else:
+        clusters = all_clusters
+        refs_with_solid = _refs_with_query_edges(all_solid_graph, clusters)
+        graph = _build_ref_filtered_graph(nx, all_graph, refs_with_solid)
+
+    components = [set(component) for component in nx.connected_components(graph)]
     _assign_orthology_categories(components, clusters)
     orthology_count = _write_orthology_tsv(
-        solid_graph,
         graph,
+        all_graph,
         clusters,
         ref_ids,
         evidence.refs_with_candidates,
@@ -249,6 +267,38 @@ def _build_solid_graph(
     return solid_graph
 
 
+def _build_ref_filtered_graph(nx, graph, ref_ids_to_keep: set[str]):
+    # Keep all query edges for refs that have at least one solid projection.
+    filtered_graph = nx.Graph()
+    filtered_graph.add_nodes_from(graph.nodes(data=True))
+    for left, right, data in graph.edges(data=True):
+        ref_node = left if str(left).startswith("ref:") else right
+        if _node_ref_id(ref_node) in ref_ids_to_keep:
+            filtered_graph.add_edge(left, right, **data)
+    return filtered_graph
+
+
+def _refs_with_query_edges(graph, clusters: list[QueryCluster]) -> set[str]:
+    # Collect reference IDs connected to any currently emitted query cluster.
+    return {
+        _node_ref_id(node)
+        for cluster in clusters
+        for node in graph.neighbors(cluster.node_id)
+        if str(node).startswith("ref:")
+    }
+
+
+def _refs_with_any_query_edges(graph) -> set[str]:
+    # Collect reference IDs that have any aligned query edge in a graph.
+    refs: set[str] = set()
+    for node, data in graph.nodes(data=True):
+        if data.get("kind") != "ref":
+            continue
+        if any(str(neighbor).startswith("query:") for neighbor in graph.neighbors(node)):
+            refs.add(_node_ref_id(node))
+    return refs
+
+
 def _edge_is_solid(
     edge_data: dict,
     min_sequence_identity: float,
@@ -261,6 +311,19 @@ def _edge_is_solid(
     if sequence_identity is None:
         return True
     return float(sequence_identity) > min_sequence_identity
+
+
+def _projection_is_solid(
+    projection: Projection,
+    min_sequence_identity: float,
+    max_fraction_gap: float,
+) -> bool:
+    # Apply the solid-match criteria to one candidate projection.
+    if projection.fraction_gap >= max_fraction_gap:
+        return False
+    if projection.sequence_identity is None:
+        return True
+    return projection.sequence_identity > min_sequence_identity
 
 
 def _assign_orthology_categories(
@@ -342,18 +405,8 @@ def _write_orthology_tsv(
             )
             count += 1
 
-        refs_with_solid_query = {
-            _node_ref_id(node)
-            for cluster in clusters
-            for node in solid_graph.neighbors(cluster.node_id)
-            if str(node).startswith("ref:")
-        }
-        refs_with_aligned_query = {
-            _node_ref_id(node)
-            for cluster in clusters
-            for node in all_graph.neighbors(cluster.node_id)
-            if str(node).startswith("ref:")
-        }
+        refs_with_solid_query = _refs_with_query_edges(solid_graph, clusters)
+        refs_with_aligned_query = _refs_with_any_query_edges(all_graph)
         for ref_id in ref_ids:
             if ref_id in refs_with_solid_query:
                 continue
