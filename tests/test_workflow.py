@@ -123,24 +123,47 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(rows[2]["span_overlap_bases"], "50")
 
-    def test_candidate_chains_match_unique_ncbi_version_suffix_aliases(self) -> None:
+    def test_candidate_chains_require_exact_chromosome_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             chain, _ = _write_inputs(tmp_path)
             bed = tmp_path / "versioned_cnees.bed"
             index = tmp_path / "index.json"
             candidates = tmp_path / "candidates.tsv"
+            # Chain uses "chr1"; BED uses the same chromosome but with an
+            # accession version suffix. There is no alias fallback anymore,
+            # so this must raise an informative error instead of silently
+            # producing zero candidates for this chromosome.
             bed.write_text("chr1.1\t120\t240\tCNEE_VERSIONED\n", encoding="utf-8")
+            build_index(chain, index)
+
+            with self.assertRaises(ValueError) as ctx:
+                write_candidates(index, bed, candidates)
+
+        self.assertIn("chr1.1", str(ctx.exception))
+        self.assertIn("chr1", str(ctx.exception))
+
+    def test_candidate_chains_allow_unmatched_bed_chromosome_with_no_alias_hint(
+        self,
+    ) -> None:
+        # A BED chromosome absent from the chain entirely (not just a
+        # version-suffix mismatch) is a normal "no coverage" case, not an error.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, _ = _write_inputs(tmp_path)
+            bed = tmp_path / "other_scaffold.bed"
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            bed.write_text("chrUn_scaffold9\t0\t10\tCNEE_UNPLACED\n", encoding="utf-8")
             build_index(chain, index)
 
             count = write_candidates(index, bed, candidates)
             rows = _read_tsv(candidates)
 
-        self.assertEqual(count, 2)
-        self.assertEqual({row["chain_id"] for row in rows}, {"1", "2"})
-        self.assertEqual({row["ref_chrom"] for row in rows}, {"chr1.1"})
+        self.assertEqual(count, 0)
+        self.assertEqual(rows, [])
 
-    def test_overlap_stats_compute_coverage_gaps_flanks_and_ranks(self) -> None:
+    def test_overlap_stats_compute_coverage_gaps_and_ranks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             chain, bed = _write_inputs(tmp_path)
@@ -149,7 +172,7 @@ class WorkflowTests(unittest.TestCase):
             build_index(chain, index)
             write_candidates(index, bed, candidates)
 
-            rows = calculate_overlap_rows(index, candidates, flank_size=25)
+            rows = calculate_overlap_rows(index, candidates)
             by_pair = {(row["cnee_id"], row["chain_id"]): row for row in rows}
 
         partial_chain_1 = by_pair[("CNEE_PARTIAL", "1")]
@@ -161,9 +184,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(partial_chain_1["query_block_count"], 1)
         self.assertEqual(partial_chain_1["query_block_sizes"], "70,")
         self.assertEqual(partial_chain_1["query_block_starts"], "0,")
-        self.assertEqual(partial_chain_1["left_flank_len"], 25)
-        self.assertEqual(partial_chain_1["left_flank_aligned_bases"], 20)
-        self.assertEqual(partial_chain_1["right_flank_aligned_bases"], 25)
         self.assertEqual(partial_chain_1["num_candidate_chains_for_cnee"], 2)
         self.assertEqual(partial_chain_1["rank_by_chain_score"], 2)
 
@@ -191,7 +211,7 @@ class WorkflowTests(unittest.TestCase):
 
             build_index(chain, index)
             write_candidates(index, bed, candidates)
-            count = write_overlap_stats(index, bed, candidates, stats, flank_size=25)
+            count = write_overlap_stats(index, candidates, stats)
 
             rows = _read_tsv(stats)
 
@@ -212,7 +232,7 @@ class WorkflowTests(unittest.TestCase):
 
             build_index(chain, index)
             write_candidates(index, bed, candidates)
-            write_overlap_stats(index, bed, candidates, stats, flank_size=25)
+            write_overlap_stats(index, candidates, stats)
             count = summarize_overlap_stats(stats, summary, cnee_bed=bed)
             rows = _read_tsv(summary)
 
@@ -289,7 +309,6 @@ class WorkflowTests(unittest.TestCase):
                 stats,
                 out_summary=summary,
                 out_orthology=orthology,
-                flank_size=25,
                 work_dir=work_dir,
             )
             stats_rows = _read_tsv(stats)
@@ -577,6 +596,61 @@ class WorkflowTests(unittest.TestCase):
         }
         self.assertEqual(na_categories["CNEE_A"], "uncertain_loss")
 
+    def test_orthology_clustering_keeps_opposite_strand_overlaps_separate(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from toga4cnee.orthology import classify_orthology
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bed = tmp_path / "cnees.bed"
+            stats = tmp_path / "stats.tsv"
+            orthology = tmp_path / "orthology.tsv"
+            query_bed = tmp_path / "query.bed"
+            bed.write_text(
+                "chr1\t0\t50\tCNEE_PLUS\nchr1\t100\t150\tCNEE_MINUS\n",
+                encoding="utf-8",
+            )
+            stats.write_text(
+                "\t".join(
+                    [
+                        "cnee_uid",
+                        "aligned_bases",
+                        "query_chrom",
+                        "query_strand",
+                        "query_aligned_start",
+                        "query_aligned_end",
+                        "query_projection_name",
+                        "gap_fraction_within_chain_span",
+                        "seq_identity",
+                    ]
+                )
+                + "\n"
+                # Same query coordinates, opposite strands, both solid.
+                + "CNEE_PLUS\t50\tchrQ\t+\t100\t150\tP#1\t0.05\t0.8\n"
+                + "CNEE_MINUS\t50\tchrQ\t-\t100\t150\tM#1\t0.05\t0.8\n",
+                encoding="utf-8",
+            )
+
+            result = classify_orthology(
+                stats,
+                bed,
+                orthology,
+                query_bed,
+                min_sequence_identity=0.7,
+                max_fraction_gap=0.1,
+            )
+            rows = _read_tsv(orthology)
+
+        # Overlapping projections on opposite strands must stay separate
+        # loci (two one2one calls), not merge into one many2one locus.
+        self.assertEqual(result.query_bed_rows, 2)
+        categories_by_query = {
+            row["query_cnee_id"]: row["orthology_category"] for row in rows
+        }
+        self.assertEqual(categories_by_query["q_CNEE_PLUS"], "one2one")
+        self.assertEqual(categories_by_query["q_CNEE_MINUS"], "one2one")
+
     def test_duplicate_cnee_ids_are_kept_distinct_via_cnee_uid(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
@@ -801,6 +875,44 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Sequence identity density for multi-query CNEEs", seq_text)
         self.assertIn("Gap fraction density for multi-query CNEEs", gap_text)
 
+    def test_fasta_accessor_fetches_correctly_across_wrapped_lines(self) -> None:
+        from toga4cnee.sequence_compare import FastaAccessor
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            fasta = tmp_path / "genome.fa"
+            # Uniform 10-base lines with a legitimately short last line.
+            fasta.write_text(
+                ">chr1\nAAAAAAAAAA\nCCCCCCCCCC\nGGGGGGG\n",
+                encoding="utf-8",
+            )
+            accessor = FastaAccessor(fasta, tmp_path / "genome.idx")
+            try:
+                self.assertEqual(
+                    accessor.fetch("chr1", 0, 27), "A" * 10 + "C" * 10 + "G" * 7
+                )
+                self.assertEqual(accessor.fetch("chr1", 8, 12), "AACC")
+            finally:
+                accessor.close()
+
+    def test_fasta_accessor_rejects_ragged_line_wrapping(self) -> None:
+        from toga4cnee.sequence_compare import FastaAccessor
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            fasta = tmp_path / "genome.fa"
+            # Line 2 of 3 has 8 bases instead of the established width of 10.
+            fasta.write_text(
+                ">chr1\nAAAAAAAAAA\nCCCCCCCC\nGGGGGGGGGG\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                FastaAccessor(fasta, tmp_path / "genome.idx")
+
+        self.assertIn("ragged", str(ctx.exception))
+        self.assertIn("chr1", str(ctx.exception))
+
     def test_sequence_comparison_metrics_for_plus_strand_projection(self) -> None:
         try:
             import Bio  # noqa: F401
@@ -845,7 +957,6 @@ class WorkflowTests(unittest.TestCase):
                     iter_overlap_rows(
                         index,
                         candidates,
-                        flank_size=25,
                         sequence_comparator=comparator,
                     )
                 )

@@ -88,11 +88,19 @@ class FastaAccessor:
         current_offset = 0
         current_line_bases = 0
         current_line_width = 0
+        # Byte-offset lookup in fetch() assumes every line of a record except
+        # the last has the same width. A line's own length can't be checked
+        # until we know it isn't the record's last line, so the check on line
+        # N is deferred until line N+1 (or the next header/EOF) arrives.
+        previous_line_bases: int | None = None
+        previous_line_number = 0
+        line_number = 0
 
         with self.fasta_path.open("rb") as handle:
             while True:
                 line_start = handle.tell()
                 line = handle.readline()
+                line_number += 1
                 if not line:
                     break
                 if line.startswith(b">"):
@@ -111,17 +119,32 @@ class FastaAccessor:
                     current_offset = handle.tell()
                     current_line_bases = 0
                     current_line_width = 0
+                    previous_line_bases = None
                     continue
                 if current_id is None:
                     raise ValueError(f"FASTA sequence encountered before header in {self.fasta_path}")
                 stripped = line.rstrip(b"\r\n")
                 if not stripped:
                     continue
+                if previous_line_bases is not None and previous_line_bases != current_line_bases:
+                    # Fail loudly rather than silently reflow -- an incorrect
+                    # auto-fix here is worse than an error the user can act on.
+                    raise ValueError(
+                        f"{self.fasta_path}: sequence {current_id!r} has ragged "
+                        f"line wrapping -- line {previous_line_number} has "
+                        f"{previous_line_bases} bases, but the record's other "
+                        f"lines have {current_line_bases}. toga4cnee requires "
+                        "every line of a FASTA record except the last to be the "
+                        "same length. Re-wrap this file to a uniform width (e.g. "
+                        "`seqkit seq -w 60 in.fa > out.fa`) and rerun."
+                    )
                 if current_line_bases == 0:
                     current_line_bases = len(stripped)
                     current_line_width = len(line)
                     current_offset = line_start
                 current_length += len(stripped)
+                previous_line_bases = len(stripped)
+                previous_line_number = line_number
 
         if current_id is not None:
             rows.append(

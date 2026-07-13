@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .bed import parse_bed
+from .summary import is_solid_match
 
 ORTHOLOGY_COLUMNS = [
     "query_cnee_id",
@@ -188,16 +189,19 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
 
 
 def _cluster_query_projections(projections: list[Projection]) -> list[QueryCluster]:
-    # Merge overlapping query-side projections into provisional query CNEE loci.
-    by_chrom: dict[str, list[Projection]] = defaultdict(list)
+    # Merge overlapping query-side projections into provisional query CNEE
+    # loci. Grouping by (chrom, strand) first ensures overlapping projections
+    # on opposite strands are never merged into the same query locus.
+    by_group: dict[tuple[str, str], list[Projection]] = defaultdict(list)
     for projection in projections:
-        by_chrom[projection.query_chrom].append(projection)
+        by_group[(projection.query_chrom, projection.query_strand)].append(projection)
 
     clusters: list[QueryCluster] = []
-    for chrom in sorted(by_chrom):
+    for group_key in sorted(by_group):
+        chrom = group_key[0]
         current: QueryCluster | None = None
         for projection in sorted(
-            by_chrom[chrom],
+            by_group[group_key],
             key=lambda item: (item.query_start, item.query_end, item.ref_id),
         ):
             if current is None or projection.query_start >= current.end:
@@ -290,20 +294,6 @@ def _refs_with_any_query_edges(graph) -> set[str]:
     return refs
 
 
-def _solid(
-    sequence_identity: float | None,
-    fraction_gap: float,
-    min_sequence_identity: float,
-    max_fraction_gap: float,
-) -> bool:
-    # Apply the solid-match criteria to one (identity, gap) pair.
-    if fraction_gap >= max_fraction_gap:
-        return False
-    if sequence_identity is None:
-        return True
-    return sequence_identity > min_sequence_identity
-
-
 def _edge_is_solid(
     edge_data: dict,
     min_sequence_identity: float,
@@ -312,7 +302,7 @@ def _edge_is_solid(
     # An edge is solid only if at least one single projection meets both
     # criteria together; metrics are never blended across projections.
     return any(
-        _solid(sequence_identity, fraction_gap, min_sequence_identity, max_fraction_gap)
+        is_solid_match(sequence_identity, fraction_gap, min_sequence_identity, max_fraction_gap)
         for sequence_identity, fraction_gap in edge_data["projection_metrics"]
     )
 
@@ -323,7 +313,7 @@ def _projection_is_solid(
     max_fraction_gap: float,
 ) -> bool:
     # Apply the solid-match criteria to one candidate projection.
-    return _solid(
+    return is_solid_match(
         projection.sequence_identity,
         projection.fraction_gap,
         min_sequence_identity,

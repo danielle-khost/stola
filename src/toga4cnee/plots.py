@@ -8,6 +8,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from .summary import stats_row_is_solid
+
 CATEGORY_ORDER = [
     "one2one",
     "one2many",
@@ -374,7 +376,7 @@ def _collect_orthology_metric_values(
             category = ref_categories.get(row["cnee_uid"])
             if category is None or category == "missing":
                 continue
-            if category in POSITIVE_CATEGORIES and not _stats_row_is_solid(
+            if category in POSITIVE_CATEGORIES and not stats_row_is_solid(
                 row,
                 min_sequence_identity=min_sequence_identity,
                 max_fraction_gap=max_fraction_gap,
@@ -424,22 +426,6 @@ def _choose_ref_category(categories: set[str]) -> str:
         if category in categories:
             return category
     return sorted(categories)[0]
-
-
-def _stats_row_is_solid(
-    row: dict[str, str],
-    min_sequence_identity: float,
-    max_fraction_gap: float,
-) -> bool:
-    # Reapply solid-edge criteria so positive-category densities use solid rows.
-    if int(row["aligned_bases"]) <= 0:
-        return False
-    if float(row["gap_fraction_within_chain_span"]) >= max_fraction_gap:
-        return False
-    seq_identity = row.get("seq_identity", ".")
-    if seq_identity == "." or seq_identity == "":
-        return True
-    return float(seq_identity) > min_sequence_identity
 
 
 def _write_grouped_density(

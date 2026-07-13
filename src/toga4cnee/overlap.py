@@ -33,12 +33,6 @@ OVERLAP_COLUMNS = CANDIDATE_COLUMNS + [
     "query_block_count",
     "query_block_sizes",
     "query_block_starts",
-    "left_flank_len",
-    "left_flank_aligned_bases",
-    "left_flank_covered_fraction",
-    "right_flank_len",
-    "right_flank_aligned_bases",
-    "right_flank_covered_fraction",
     "num_candidate_chains_for_cnee",
     "rank_by_chain_score",
 ] + SEQUENCE_COLUMNS
@@ -173,12 +167,9 @@ def _rank_candidates(rows: list[dict[str, str]]) -> dict[tuple[str, str], int]:
 def iter_overlap_rows(
     index_path: str | Path,
     candidate_path: str | Path,
-    flank_size: int = 1000,
     sequence_comparator: SequenceComparator | None = None,
 ) -> Iterator[dict[str, str | int | float]]:
     # Stream one overlap-stat row per candidate chain/CNEE pair.
-    if flank_size < 0:
-        raise ValueError("flank_size must be non-negative")
     payload, records = load_index(index_path)
     chain_path = payload["indexed_chain_path"]
     record_by_id: dict[str, ChainRecord] = {record.chain_id: record for record in records}
@@ -227,15 +218,6 @@ def iter_overlap_rows(
                     ),
                 )
 
-            left_start = max(0, ref_start - flank_size)
-            left_end = ref_start
-            right_start = ref_end
-            right_end = ref_end + flank_size
-            left_len = left_end - left_start
-            right_len = right_end - right_start
-            left_aligned, _, _, _ = _aligned_bases(blocks, left_start, left_end)
-            right_aligned, _, _, _ = _aligned_bases(blocks, right_start, right_end)
-
             output_row: dict[str, str | int | float] = dict(candidate)
             projection_name = f"{candidate['cnee_uid']}#{chain_id}"
             output_row.update(
@@ -251,12 +233,6 @@ def iter_overlap_rows(
                     "query_block_count": query_block_count,
                     "query_block_sizes": query_block_sizes,
                     "query_block_starts": query_block_starts,
-                    "left_flank_len": left_len,
-                    "left_flank_aligned_bases": left_aligned,
-                    "left_flank_covered_fraction": fraction(left_aligned, left_len),
-                    "right_flank_len": right_len,
-                    "right_flank_aligned_bases": right_aligned,
-                    "right_flank_covered_fraction": fraction(right_aligned, right_len),
                     "num_candidate_chains_for_cnee": candidate_counts[
                         candidate["cnee_uid"]
                     ],
@@ -270,24 +246,20 @@ def iter_overlap_rows(
 def calculate_overlap_rows(
     index_path: str | Path,
     candidate_path: str | Path,
-    flank_size: int = 1000,
+    sequence_comparator: SequenceComparator | None = None,
 ) -> list[dict[str, str | int | float]]:
     # Materialize overlap rows for tests and small programmatic callers.
-    return list(iter_overlap_rows(index_path, candidate_path, flank_size))
+    return list(iter_overlap_rows(index_path, candidate_path, sequence_comparator))
 
 
 def write_overlap_stats(
     index_path: str | Path,
-    bed_path: str | Path,
     candidate_path: str | Path,
     out_path: str | Path,
-    flank_size: int = 1000,
+    sequence_comparator: SequenceComparator | None = None,
 ) -> int:
-    # Write overlap stats directly from an index and candidate table.
-    # BED is intentionally accepted here to keep the CLI contract explicit. The
-    # candidate table carries the CNEE coordinates used for v1 stats.
-    _ = bed_path
-    rows = iter_overlap_rows(index_path, candidate_path, flank_size)
+    # Stream overlap-stat rows straight to disk from an index and candidate table.
+    rows = iter_overlap_rows(index_path, candidate_path, sequence_comparator)
     count = 0
     with Path(out_path).open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=OVERLAP_COLUMNS, delimiter="\t")

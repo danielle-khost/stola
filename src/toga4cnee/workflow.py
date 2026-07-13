@@ -10,7 +10,7 @@ from pathlib import Path
 from .candidates import write_candidates
 from .index import build_index
 from .orthology import OrthologyResult, classify_orthology
-from .overlap import OVERLAP_COLUMNS, iter_overlap_rows
+from .overlap import OVERLAP_COLUMNS, write_overlap_stats
 from .sequence_compare import SequenceComparator
 from .synteny import SyntenyResult, write_synteny_verification
 from .summary import stats_row_is_solid, summarize_overlap_stats
@@ -52,7 +52,6 @@ def run_workflow(
     out_synteny: str | Path | None = None,
     ref_fasta: str | Path | None = None,
     query_fasta: str | Path | None = None,
-    flank_size: int = 1000,
     synteny_flank_size: int = 10000,
     synteny_max_one2one_controls: int = 50000,
     min_sequence_identity: float = 0.7,
@@ -61,8 +60,6 @@ def run_workflow(
 ) -> WorkflowResult:
     """Run indexing, candidate discovery, overlap stats, and query BED export."""
     # Normalize output paths, validate paired FASTA inputs, and choose a work dir.
-    if flank_size < 0:
-        raise ValueError("flank_size must be non-negative")
     if synteny_flank_size < 0:
         raise ValueError("synteny_flank_size must be non-negative")
     if synteny_max_one2one_controls < 0:
@@ -131,7 +128,6 @@ def run_workflow(
                 out_synteny_path,
                 ref_fasta,
                 query_fasta,
-                flank_size,
                 synteny_flank_size,
                 synteny_max_one2one_controls,
                 min_sequence_identity,
@@ -155,7 +151,6 @@ def run_workflow(
         out_synteny_path,
         ref_fasta,
         query_fasta,
-        flank_size,
         synteny_flank_size,
         synteny_max_one2one_controls,
         min_sequence_identity,
@@ -178,7 +173,6 @@ def _run_workflow_in_dir(
     out_synteny: Path,
     ref_fasta: str | Path | None,
     query_fasta: str | Path | None,
-    flank_size: int,
     synteny_flank_size: int,
     synteny_max_one2one_controls: int,
     min_sequence_identity: float,
@@ -197,11 +191,10 @@ def _run_workflow_in_dir(
         else None
     )
     try:
-        stats_count = _write_stats(
+        stats_count = write_overlap_stats(
             index_path,
             candidates_path,
             out_stats,
-            flank_size,
             sequence_comparator=sequence_comparator,
         )
         orthology_result = classify_orthology(
@@ -280,30 +273,6 @@ def _run_workflow_in_dir(
         strict_bed_path=out_strict_bed,
         strict_orthology_path=out_strict_orthology,
     )
-
-
-def _write_stats(
-    index_path: Path,
-    candidates_path: Path,
-    out_stats: Path,
-    flank_size: int,
-    sequence_comparator: SequenceComparator | None = None,
-) -> int:
-    # Stream overlap-stat rows to disk, optionally adding sequence metrics.
-    stats_count = 0
-    rows = iter_overlap_rows(
-        index_path,
-        candidates_path,
-        flank_size=flank_size,
-        sequence_comparator=sequence_comparator,
-    )
-    with out_stats.open("w", encoding="utf-8", newline="") as stats_handle:
-        writer = csv.DictWriter(stats_handle, fieldnames=OVERLAP_COLUMNS, delimiter="\t")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-            stats_count += 1
-    return stats_count
 
 
 def _write_strict_stats(

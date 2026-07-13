@@ -23,8 +23,18 @@ for example `query_cnees.strict.bed`, `overlap_stats.strict.tsv`,
 Use `--work-dir` to keep intermediate index and candidate TSV files.
 Diagnostic figures are generated separately from completed outputs.
 
+The reference BED and chain file must use exactly the same chromosome/contig
+naming convention -- there is no accession-version alias fallback. A BED
+chromosome that only fails to match because of a stripped or added accession
+version (e.g. `chr1.1` vs `chr1`) raises an informative error rather than
+silently being treated as having no chain coverage; rename one side to match
+the other and rerun.
+
 The current orthology pass draws an edge for every aligned query projection and
-classifies graph components. By default, a projection is solid when it has
+classifies graph components. Query-side projections are only merged into the
+same query locus when they overlap on the same strand; overlapping projections
+on opposite strands become separate loci. By default, a projection is solid
+when it has
 `fraction_gap < 0.1`; when FASTAs are supplied it must also have
 `sequence_identity > 0.7`. Both criteria must be met by the same projection --
 metrics are never blended across the multiple projections that can share one
@@ -43,7 +53,9 @@ Reference CNEE identity is tracked internally by the unique `cnee_uid`, not the
 display `cnee_id` (BED column 4), so two BED intervals that happen to share a
 name are never merged into one reference locus; `partner_ref_cnees` and the
 summary TSV report `cnee_uid` values, which match `cnee_id` unless the input
-BED has duplicate names. Parsing a BED with duplicate names emits a warning.
+BED has duplicate names. Parsing a BED with duplicate names emits a warning,
+as does parsing a BED with zero-length intervals (which can never overlap a
+chain and always end up `missing`).
 
 The workflow also writes an exploratory flanking-synteny verification table at
 `overlap_stats.synteny.tsv`. This table reports weak all-mode projections,
@@ -54,7 +66,11 @@ control the maximum number of one2one rows, default `50000`.
 
 When both `--ref-fasta` and `--query-fasta` are supplied, the stats and summary
 also include direct chain-aligned sequence identity and mismatch counts. These
-metrics require Biopython.
+metrics require Biopython. FASTA indexing requires uniform line width within
+each record (every line except the last must be the same length); a ragged
+FASTA raises a clear error naming the offending sequence rather than silently
+computing wrong offsets -- re-wrap it to a fixed width (e.g.
+`seqkit seq -w 60 in.fa > out.fa`) and rerun.
 
 Create the summary from an existing stats file:
 

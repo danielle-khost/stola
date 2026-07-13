@@ -42,26 +42,45 @@ def _group_chains_by_ref_chrom(
 
 
 def _without_ncbi_version(chrom: str) -> str:
-    # Strip a terminal numeric accession version when it is unambiguous.
+    # Strip a terminal numeric accession version, for mismatch diagnostics only.
     prefix, dot, suffix = chrom.rpartition(".")
     if dot and suffix.isdigit():
         return prefix
     return chrom
 
 
-def _bed_chrom_lookup(
+def _check_chromosome_names_match(
+    chains_by_chrom: dict[str, list[ChainRecord]],
     cnees_by_chrom: dict[str, list[BedInterval]],
-) -> dict[str, list[BedInterval]]:
-    # Build exact and safe version-stripped chromosome aliases for BED intervals.
-    lookup = dict(cnees_by_chrom)
-    stripped_to_originals: defaultdict[str, list[str]] = defaultdict(list)
-    for chrom in cnees_by_chrom:
-        stripped_to_originals[_without_ncbi_version(chrom)].append(chrom)
-    for stripped, originals in stripped_to_originals.items():
-        if stripped in lookup or len(originals) != 1:
-            continue
-        lookup[stripped] = cnees_by_chrom[originals[0]]
-    return lookup
+) -> None:
+    # Chain and BED chromosome names must match exactly -- no alias fallback.
+    # A mismatch that would disappear after stripping an NCBI accession
+    # version is a common, confusing failure mode, so it gets a specific,
+    # actionable error instead of silently dropping those CNEEs as "missing".
+    chain_chroms = set(chains_by_chrom)
+    bed_chroms = set(cnees_by_chrom)
+    if bed_chroms <= chain_chroms:
+        return
+    stripped_chain_chroms: dict[str, str] = {}
+    for chrom in sorted(chain_chroms):
+        stripped_chain_chroms.setdefault(_without_ncbi_version(chrom), chrom)
+
+    mismatches = [
+        (bed_chrom, stripped_chain_chroms[_without_ncbi_version(bed_chrom)])
+        for bed_chrom in sorted(bed_chroms - chain_chroms)
+        if _without_ncbi_version(bed_chrom) in stripped_chain_chroms
+    ]
+    if not mismatches:
+        return
+    examples = "; ".join(f"BED {bed!r} vs chain {chain!r}" for bed, chain in mismatches[:5])
+    more = f", plus {len(mismatches) - 5} more" if len(mismatches) > 5 else ""
+    raise ValueError(
+        "Reference BED and chain file use different chromosome naming "
+        f"conventions -- e.g. {examples}{more}. toga4cnee requires exact "
+        "chromosome ID matches between the BED and chain files; rename one "
+        "side to match the other (e.g. add or strip the accession version) "
+        "and rerun."
+    )
 
 
 def iter_candidate_rows(
@@ -70,11 +89,11 @@ def iter_candidate_rows(
     # Emit every chain/CNEE pair whose reference-side spans overlap at all.
     rows: list[dict[str, str | int]] = []
     cnees_by_chrom = group_bed_by_chrom(cnees)
-    cnees_by_chain_chrom = _bed_chrom_lookup(cnees_by_chrom)
     chains_by_chrom = _group_chains_by_ref_chrom(chains)
+    _check_chromosome_names_match(chains_by_chrom, cnees_by_chrom)
 
     for chrom, chrom_chains in chains_by_chrom.items():
-        chrom_cnees = cnees_by_chain_chrom.get(chrom)
+        chrom_cnees = cnees_by_chrom.get(chrom)
         if not chrom_cnees:
             continue
         first_possible = 0

@@ -22,6 +22,7 @@ def parse_bed(path: str | Path) -> list[BedInterval]:
     intervals: list[BedInterval] = []
     seen_ids: defaultdict[str, int] = defaultdict(int)
     duplicated_ids: set[str] = set()
+    zero_length_ids: list[str] = []
     with Path(path).open("r", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.rstrip("\n")
@@ -46,6 +47,8 @@ def parse_bed(path: str | Path) -> list[BedInterval]:
             cnee_uid = (
                 cnee_id if seen_ids[cnee_id] == 1 else f"{cnee_id}__line{line_number}"
             )
+            if end == start:
+                zero_length_ids.append(cnee_uid)
             intervals.append(
                 BedInterval(
                     cnee_uid=cnee_uid,
@@ -65,6 +68,15 @@ def parse_bed(path: str | Path) -> list[BedInterval]:
             "happen to share a display name; downstream output keys on the "
             "unique cnee_uid (e.g. 'name__line123') to keep them from being "
             "treated as the same reference locus.",
+            stacklevel=2,
+        )
+    if zero_length_ids:
+        shown = ", ".join(sorted(zero_length_ids)[:10])
+        more = ", ..." if len(zero_length_ids) > 10 else ""
+        warnings.warn(
+            f"{path}: {len(zero_length_ids)} CNEE(s) have zero-length intervals "
+            f"({shown}{more}). A zero-length interval can never overlap a chain "
+            "and will always be reported as missing.",
             stacklevel=2,
         )
     return intervals

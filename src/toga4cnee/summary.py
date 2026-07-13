@@ -173,6 +173,21 @@ def summarize_overlap_stats(
     return len(summaries)
 
 
+def is_solid_match(
+    sequence_identity: float | None,
+    fraction_gap: float,
+    min_sequence_identity: float,
+    max_fraction_gap: float,
+) -> bool:
+    """Apply the shared solid-match criteria to one (identity, gap) pair."""
+    # The single source of truth for "solid" used by summary/orthology/plots.
+    if fraction_gap >= max_fraction_gap:
+        return False
+    if sequence_identity is None:
+        return True
+    return sequence_identity > min_sequence_identity
+
+
 def stats_row_is_solid(
     row: dict[str, str],
     min_sequence_identity: float = 0.7,
@@ -181,9 +196,11 @@ def stats_row_is_solid(
     # Apply solid-match criteria directly to one overlap-stats row.
     if int(row["aligned_bases"]) <= 0:
         return False
-    if float(row["gap_fraction_within_chain_span"]) >= max_fraction_gap:
-        return False
-    seq_identity = row.get("seq_identity", ".")
-    if seq_identity in {"", "."}:
-        return True
-    return float(seq_identity) > min_sequence_identity
+    seq_identity_text = row.get("seq_identity", ".")
+    seq_identity = None if seq_identity_text in {"", "."} else float(seq_identity_text)
+    return is_solid_match(
+        seq_identity,
+        float(row["gap_fraction_within_chain_span"]),
+        min_sequence_identity,
+        max_fraction_gap,
+    )

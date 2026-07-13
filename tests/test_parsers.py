@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -83,6 +84,30 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(intervals[1].cnee_uid, "CNEE_A")
         self.assertEqual(intervals[2].cnee_id, "CNEE_A")
         self.assertEqual(intervals[2].cnee_uid, "CNEE_A__line3")
+
+    def test_parse_bed_warns_on_zero_length_intervals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bed = Path(tmpdir) / "cnees.bed"
+            bed.write_text(
+                "\n".join(
+                    [
+                        "chr1\t10\t20\tCNEE_NORMAL",
+                        "chr1\t30\t30\tCNEE_ZERO_LEN",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                intervals = parse_bed(bed)
+
+        self.assertEqual(len(intervals), 2)
+        self.assertTrue(
+            any("zero-length" in str(w.message) for w in caught),
+            "expected a zero-length CNEE warning",
+        )
 
     def test_overlap_length_uses_half_open_intervals(self) -> None:
         self.assertEqual(overlap_length(10, 20, 20, 30), 0)

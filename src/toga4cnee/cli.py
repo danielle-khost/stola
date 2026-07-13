@@ -37,7 +37,6 @@ def _run(args: argparse.Namespace) -> None:
         out_synteny=args.out_synteny,
         ref_fasta=args.ref_fasta,
         query_fasta=args.query_fasta,
-        flank_size=args.flank_size,
         synteny_flank_size=args.synteny_flank_size,
         synteny_max_one2one_controls=args.synteny_max_one2one_controls,
         min_sequence_identity=args.min_sequence_identity,
@@ -175,7 +174,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Flanking-synteny verification TSV [default: OUT_STATS with .synteny before extension]",
     )
-    run_parser.add_argument("--flank-size", type=int, default=1000)
     run_parser.add_argument(
         "--synteny-flank-size",
         type=int,
