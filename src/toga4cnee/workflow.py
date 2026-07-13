@@ -12,6 +12,7 @@ from .index import build_index
 from .orthology import OrthologyResult, classify_orthology
 from .overlap import OVERLAP_COLUMNS, iter_overlap_rows
 from .sequence_compare import SequenceComparator
+from .synteny import SyntenyResult, write_synteny_verification
 from .summary import stats_row_is_solid, summarize_overlap_stats
 
 
@@ -27,8 +28,10 @@ class WorkflowResult:
     strict_summary_count: int
     orthology_result: OrthologyResult
     strict_orthology_result: OrthologyResult
+    synteny_result: SyntenyResult
     index_path: Path
     candidates_path: Path
+    synteny_path: Path
     strict_stats_path: Path
     strict_summary_path: Path
     strict_bed_path: Path
@@ -46,9 +49,12 @@ def run_workflow(
     out_strict_stats: str | Path | None = None,
     out_strict_summary: str | Path | None = None,
     out_strict_orthology: str | Path | None = None,
+    out_synteny: str | Path | None = None,
     ref_fasta: str | Path | None = None,
     query_fasta: str | Path | None = None,
     flank_size: int = 1000,
+    synteny_flank_size: int = 10000,
+    synteny_max_one2one_controls: int = 50000,
     min_sequence_identity: float = 0.7,
     max_fraction_gap: float = 0.1,
     work_dir: str | Path | None = None,
@@ -57,6 +63,10 @@ def run_workflow(
     # Normalize output paths, validate paired FASTA inputs, and choose a work dir.
     if flank_size < 0:
         raise ValueError("flank_size must be non-negative")
+    if synteny_flank_size < 0:
+        raise ValueError("synteny_flank_size must be non-negative")
+    if synteny_max_one2one_controls < 0:
+        raise ValueError("synteny_max_one2one_controls must be non-negative")
     if (ref_fasta is None) != (query_fasta is None):
         raise ValueError("--ref-fasta and --query-fasta must be supplied together")
 
@@ -90,6 +100,11 @@ def run_workflow(
         if out_strict_orthology is not None
         else _add_suffix_before_extension(out_stats, ".strict.orthology")
     )
+    out_synteny_path = (
+        Path(out_synteny)
+        if out_synteny is not None
+        else _add_suffix_before_extension(out_stats, ".synteny")
+    )
     out_bed.parent.mkdir(parents=True, exist_ok=True)
     out_stats.parent.mkdir(parents=True, exist_ok=True)
     out_summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +113,7 @@ def run_workflow(
     out_strict_stats_path.parent.mkdir(parents=True, exist_ok=True)
     out_strict_summary_path.parent.mkdir(parents=True, exist_ok=True)
     out_strict_orthology_path.parent.mkdir(parents=True, exist_ok=True)
+    out_synteny_path.parent.mkdir(parents=True, exist_ok=True)
 
     if work_dir is None:
         with tempfile.TemporaryDirectory(prefix="toga4cnee_") as tmpdir:
@@ -112,9 +128,12 @@ def run_workflow(
                 out_strict_stats_path,
                 out_strict_summary_path,
                 out_strict_orthology_path,
+                out_synteny_path,
                 ref_fasta,
                 query_fasta,
                 flank_size,
+                synteny_flank_size,
+                synteny_max_one2one_controls,
                 min_sequence_identity,
                 max_fraction_gap,
                 Path(tmpdir),
@@ -133,9 +152,12 @@ def run_workflow(
         out_strict_stats_path,
         out_strict_summary_path,
         out_strict_orthology_path,
+        out_synteny_path,
         ref_fasta,
         query_fasta,
         flank_size,
+        synteny_flank_size,
+        synteny_max_one2one_controls,
         min_sequence_identity,
         max_fraction_gap,
         work_path,
@@ -153,9 +175,12 @@ def _run_workflow_in_dir(
     out_strict_stats: Path,
     out_strict_summary: Path,
     out_strict_orthology: Path,
+    out_synteny: Path,
     ref_fasta: str | Path | None,
     query_fasta: str | Path | None,
     flank_size: int,
+    synteny_flank_size: int,
+    synteny_max_one2one_controls: int,
     min_sequence_identity: float,
     max_fraction_gap: float,
     work_dir: Path,
@@ -179,49 +204,61 @@ def _run_workflow_in_dir(
             flank_size,
             sequence_comparator=sequence_comparator,
         )
+        orthology_result = classify_orthology(
+            out_stats,
+            cnee_bed,
+            out_orthology,
+            out_bed,
+            min_sequence_identity=min_sequence_identity,
+            max_fraction_gap=max_fraction_gap,
+            output_mode="all",
+        )
+        strict_orthology_result = classify_orthology(
+            out_stats,
+            cnee_bed,
+            out_strict_orthology,
+            out_strict_bed,
+            min_sequence_identity=min_sequence_identity,
+            max_fraction_gap=max_fraction_gap,
+            output_mode="strict",
+        )
+        synteny_result = write_synteny_verification(
+            index_path,
+            out_stats,
+            out_bed,
+            out_orthology,
+            out_synteny,
+            flank_size=synteny_flank_size,
+            min_sequence_identity=min_sequence_identity,
+            max_fraction_gap=max_fraction_gap,
+            max_one2one_controls=synteny_max_one2one_controls,
+            sequence_comparator=sequence_comparator,
+        )
+        summary_count = summarize_overlap_stats(
+            out_stats,
+            out_summary,
+            cnee_bed=cnee_bed,
+            require_solid_reference=True,
+            min_sequence_identity=min_sequence_identity,
+            max_fraction_gap=max_fraction_gap,
+        )
+        strict_stats_count = _write_strict_stats(
+            out_stats,
+            out_strict_stats,
+            min_sequence_identity=min_sequence_identity,
+            max_fraction_gap=max_fraction_gap,
+        )
+        strict_summary_count = summarize_overlap_stats(
+            out_stats,
+            out_strict_summary,
+            cnee_bed=cnee_bed,
+            solid_only=True,
+            min_sequence_identity=min_sequence_identity,
+            max_fraction_gap=max_fraction_gap,
+        )
     finally:
         if sequence_comparator is not None:
             sequence_comparator.close()
-    orthology_result = classify_orthology(
-        out_stats,
-        cnee_bed,
-        out_orthology,
-        out_bed,
-        min_sequence_identity=min_sequence_identity,
-        max_fraction_gap=max_fraction_gap,
-        output_mode="all",
-    )
-    strict_orthology_result = classify_orthology(
-        out_stats,
-        cnee_bed,
-        out_strict_orthology,
-        out_strict_bed,
-        min_sequence_identity=min_sequence_identity,
-        max_fraction_gap=max_fraction_gap,
-        output_mode="strict",
-    )
-    summary_count = summarize_overlap_stats(
-        out_stats,
-        out_summary,
-        cnee_bed=cnee_bed,
-        require_solid_reference=True,
-        min_sequence_identity=min_sequence_identity,
-        max_fraction_gap=max_fraction_gap,
-    )
-    strict_stats_count = _write_strict_stats(
-        out_stats,
-        out_strict_stats,
-        min_sequence_identity=min_sequence_identity,
-        max_fraction_gap=max_fraction_gap,
-    )
-    strict_summary_count = summarize_overlap_stats(
-        out_stats,
-        out_strict_summary,
-        cnee_bed=cnee_bed,
-        solid_only=True,
-        min_sequence_identity=min_sequence_identity,
-        max_fraction_gap=max_fraction_gap,
-    )
 
     return WorkflowResult(
         chain_count=int(index_payload["chain_count"]),
@@ -234,8 +271,10 @@ def _run_workflow_in_dir(
         strict_summary_count=strict_summary_count,
         orthology_result=orthology_result,
         strict_orthology_result=strict_orthology_result,
+        synteny_result=synteny_result,
         index_path=index_path,
         candidates_path=candidates_path,
+        synteny_path=out_synteny,
         strict_stats_path=out_strict_stats,
         strict_summary_path=out_strict_summary,
         strict_bed_path=out_strict_bed,

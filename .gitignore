@@ -16,3 +16,5 @@ dist/
 unmapped*
 test_runs/
 dummy*
+*.png
+*.pdf

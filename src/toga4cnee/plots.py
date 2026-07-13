@@ -230,12 +230,12 @@ def write_sequence_identity_density(
     total = 0
     with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        required = {"cnee_id", "seq_identity"} if ref_ids is not None else {"seq_identity"}
+        required = {"cnee_uid", "seq_identity"} if ref_ids is not None else {"seq_identity"}
         missing = sorted(required.difference(reader.fieldnames or []))
         if missing:
             raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
         for row in reader:
-            if ref_ids is not None and row["cnee_id"] not in ref_ids:
+            if ref_ids is not None and row["cnee_uid"] not in ref_ids:
                 continue
             value_text = row["seq_identity"]
             if value_text == ".":
@@ -273,7 +273,7 @@ def write_gap_fraction_density(
     with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         required = (
-            {"cnee_id", "gap_fraction_within_chain_span"}
+            {"cnee_uid", "gap_fraction_within_chain_span"}
             if ref_ids is not None
             else {"gap_fraction_within_chain_span"}
         )
@@ -281,7 +281,7 @@ def write_gap_fraction_density(
         if missing:
             raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
         for row in reader:
-            if ref_ids is not None and row["cnee_id"] not in ref_ids:
+            if ref_ids is not None and row["cnee_uid"] not in ref_ids:
                 continue
             value = min(1.0, max(0.0, float(row["gap_fraction_within_chain_span"])))
             index = min(bins - 1, int(value * bins))
@@ -338,13 +338,13 @@ def _read_multi_alignment_ref_ids(summary_path: str | Path) -> set[str]:
     ref_ids: set[str] = set()
     with Path(summary_path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        required = {"cnee_id", "num_query_alignments"}
+        required = {"cnee_uid", "num_query_alignments"}
         missing = sorted(required.difference(reader.fieldnames or []))
         if missing:
             raise ValueError(f"Summary file is missing columns: {', '.join(missing)}")
         for row in reader:
             if int(row["num_query_alignments"]) > 1:
-                ref_ids.add(row["cnee_id"])
+                ref_ids.add(row["cnee_uid"])
     return ref_ids
 
 
@@ -362,7 +362,7 @@ def _collect_orthology_metric_values(
     with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         required = {
-            "cnee_id",
+            "cnee_uid",
             "aligned_bases",
             "gap_fraction_within_chain_span",
             "seq_identity",
@@ -371,7 +371,7 @@ def _collect_orthology_metric_values(
         if missing:
             raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
         for row in reader:
-            category = ref_categories.get(row["cnee_id"])
+            category = ref_categories.get(row["cnee_uid"])
             if category is None or category == "missing":
                 continue
             if category in POSITIVE_CATEGORIES and not _stats_row_is_solid(

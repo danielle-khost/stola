@@ -34,9 +34,12 @@ def _run(args: argparse.Namespace) -> None:
         out_strict_stats=args.out_strict_stats,
         out_strict_summary=args.out_strict_summary,
         out_strict_orthology=args.out_strict_orthology,
+        out_synteny=args.out_synteny,
         ref_fasta=args.ref_fasta,
         query_fasta=args.query_fasta,
         flank_size=args.flank_size,
+        synteny_flank_size=args.synteny_flank_size,
+        synteny_max_one2one_controls=args.synteny_max_one2one_controls,
         min_sequence_identity=args.min_sequence_identity,
         max_fraction_gap=args.max_fraction_gap,
         work_dir=args.work_dir,
@@ -64,6 +67,10 @@ def _run(args: argparse.Namespace) -> None:
     print(
         f"Wrote {result.strict_summary_count} strict CNEE summary rows -> "
         f"{result.strict_summary_path}"
+    )
+    print(
+        f"Wrote {result.synteny_result.rows} synteny verification rows -> "
+        f"{result.synteny_path}"
     )
     if args.work_dir is not None:
         print(f"Kept intermediates in {args.work_dir}")
@@ -162,7 +169,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Strict graph-based orthology TSV [default: OUT_STATS with .strict.orthology before extension]",
     )
+    run_parser.add_argument(
+        "--out-synteny",
+        type=Path,
+        default=None,
+        help="Flanking-synteny verification TSV [default: OUT_STATS with .synteny before extension]",
+    )
     run_parser.add_argument("--flank-size", type=int, default=1000)
+    run_parser.add_argument(
+        "--synteny-flank-size",
+        type=int,
+        default=10000,
+        help="Reference bases upstream/downstream for flanking-synteny verification [default: 10000]",
+    )
+    run_parser.add_argument(
+        "--synteny-max-one2one-controls",
+        type=int,
+        default=50000,
+        help="Maximum one2one positive-control projections in synteny output [default: 50000]",
+    )
     run_parser.add_argument(
         "--min-sequence-identity",
         type=float,

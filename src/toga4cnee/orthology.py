@@ -37,21 +37,19 @@ class ProjectionEvidence:
 
 @dataclass
 class EdgeMetrics:
-    sequence_identity: float | None
-    fraction_gap: float
-    projection_count: int = 1
+    projection_metrics: list[tuple[float | None, float]] = field(default_factory=list)
 
     def add_projection(self, projection: Projection) -> None:
-        # Keep the best sequence identity and lowest gap fraction for this edge.
-        if projection.sequence_identity is not None:
-            if self.sequence_identity is None:
-                self.sequence_identity = projection.sequence_identity
-            else:
-                self.sequence_identity = max(
-                    self.sequence_identity, projection.sequence_identity
-                )
-        self.fraction_gap = min(self.fraction_gap, projection.fraction_gap)
-        self.projection_count += 1
+        # Keep each projection's own (identity, gap) pair. Solidity is judged
+        # per single projection, never blended across projections landing on
+        # the same ref/query edge.
+        self.projection_metrics.append(
+            (projection.sequence_identity, projection.fraction_gap)
+        )
+
+    @property
+    def projection_count(self) -> int:
+        return len(self.projection_metrics)
 
 
 @dataclass
@@ -104,7 +102,7 @@ def classify_orthology(
             "Activate the biopython conda environment or install networkx."
         ) from exc
 
-    ref_ids = [interval.cnee_id for interval in parse_bed(cnee_bed)]
+    ref_ids = [interval.cnee_uid for interval in parse_bed(cnee_bed)]
     evidence = _read_projection_evidence(stats_path)
     all_clusters = _cluster_query_projections(evidence.projections)
     all_graph = _build_orthology_graph(nx, ref_ids, all_clusters)
@@ -152,7 +150,7 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
     with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         required = {
-            "cnee_id",
+            "cnee_uid",
             "aligned_bases",
             "query_chrom",
             "query_strand",
@@ -166,14 +164,14 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
         if missing:
             raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
         for row in reader:
-            refs_with_candidates.add(row["cnee_id"])
+            refs_with_candidates.add(row["cnee_uid"])
             if int(row["aligned_bases"]) <= 0:
                 continue
             if row["query_aligned_start"] == "." or row["query_aligned_end"] == ".":
                 continue
             projections.append(
                 Projection(
-                    ref_id=row["cnee_id"],
+                    ref_id=row["cnee_uid"],
                     query_chrom=row["query_chrom"],
                     query_start=int(row["query_aligned_start"]),
                     query_end=int(row["query_aligned_end"]),
@@ -222,14 +220,8 @@ def _cluster_query_projections(projections: list[Projection]) -> list[QueryClust
 
 
 def _add_cluster_edge_metrics(cluster: QueryCluster, projection: Projection) -> None:
-    # Aggregate projection scores for the graph edge between this ref/query pair.
-    metrics = cluster.edge_metrics.get(projection.ref_id)
-    if metrics is None:
-        cluster.edge_metrics[projection.ref_id] = EdgeMetrics(
-            sequence_identity=projection.sequence_identity,
-            fraction_gap=projection.fraction_gap,
-        )
-        return
+    # Record this projection's own metrics on the ref/query edge.
+    metrics = cluster.edge_metrics.setdefault(projection.ref_id, EdgeMetrics())
     metrics.add_projection(projection)
 
 
@@ -245,8 +237,7 @@ def _build_orthology_graph(nx, ref_ids: list[str], clusters: list[QueryCluster])
             graph.add_edge(
                 _ref_node(ref_id),
                 cluster.node_id,
-                sequence_identity=metrics.sequence_identity,
-                fraction_gap=metrics.fraction_gap,
+                projection_metrics=metrics.projection_metrics,
                 projection_count=metrics.projection_count,
             )
     return graph
@@ -299,18 +290,31 @@ def _refs_with_any_query_edges(graph) -> set[str]:
     return refs
 
 
+def _solid(
+    sequence_identity: float | None,
+    fraction_gap: float,
+    min_sequence_identity: float,
+    max_fraction_gap: float,
+) -> bool:
+    # Apply the solid-match criteria to one (identity, gap) pair.
+    if fraction_gap >= max_fraction_gap:
+        return False
+    if sequence_identity is None:
+        return True
+    return sequence_identity > min_sequence_identity
+
+
 def _edge_is_solid(
     edge_data: dict,
     min_sequence_identity: float,
     max_fraction_gap: float,
 ) -> bool:
-    # Decide whether an edge is high-quality enough for orthology classification.
-    if float(edge_data["fraction_gap"]) >= max_fraction_gap:
-        return False
-    sequence_identity = edge_data.get("sequence_identity")
-    if sequence_identity is None:
-        return True
-    return float(sequence_identity) > min_sequence_identity
+    # An edge is solid only if at least one single projection meets both
+    # criteria together; metrics are never blended across projections.
+    return any(
+        _solid(sequence_identity, fraction_gap, min_sequence_identity, max_fraction_gap)
+        for sequence_identity, fraction_gap in edge_data["projection_metrics"]
+    )
 
 
 def _projection_is_solid(
@@ -319,11 +323,12 @@ def _projection_is_solid(
     max_fraction_gap: float,
 ) -> bool:
     # Apply the solid-match criteria to one candidate projection.
-    if projection.fraction_gap >= max_fraction_gap:
-        return False
-    if projection.sequence_identity is None:
-        return True
-    return projection.sequence_identity > min_sequence_identity
+    return _solid(
+        projection.sequence_identity,
+        projection.fraction_gap,
+        min_sequence_identity,
+        max_fraction_gap,
+    )
 
 
 def _assign_orthology_categories(

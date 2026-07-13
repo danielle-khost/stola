@@ -23,19 +23,34 @@ for example `query_cnees.strict.bed`, `overlap_stats.strict.tsv`,
 Use `--work-dir` to keep intermediate index and candidate TSV files.
 Diagnostic figures are generated separately from completed outputs.
 
-The current orthology pass draws an edge for every aligned query projection,
-stores `sequence_identity` and `fraction_gap` on that edge, and classifies graph
-components. By default, a solid edge has `fraction_gap < 0.1`; when FASTAs are
-supplied it must also have `sequence_identity > 0.7`. Tune these with
-`--max-fraction-gap` and `--min-sequence-identity`. All output keeps every
-aligned query projection for a reference CNEE that has at least one solid
-projection. Strict output keeps only solid projections; references with weak
-aligned projections but no solid projection are retained as `uncertain_loss` in
-both modes. Categories are `one2one`, `one2many`, `many2one`, `lost`,
-`missing`, `uncertain_loss`, or the catch-all `complex/many2many`. The
-orthology TSV has three columns: `query_cnee_id`, `partner_ref_cnees`, and
-`orthology_category`; non-query reference outcomes are written with `NA` as the
-query ID.
+The current orthology pass draws an edge for every aligned query projection and
+classifies graph components. By default, a projection is solid when it has
+`fraction_gap < 0.1`; when FASTAs are supplied it must also have
+`sequence_identity > 0.7`. Both criteria must be met by the same projection --
+metrics are never blended across the multiple projections that can share one
+ref/query edge, so an edge is solid only if at least one of its projections
+passes both checks on its own. Tune these with `--max-fraction-gap` and
+`--min-sequence-identity`. All output keeps every aligned query projection for
+a reference CNEE that has at least one solid projection. Strict output keeps
+only solid projections; references with weak aligned projections but no solid
+projection are retained as `uncertain_loss` in both modes. Categories are
+`one2one`, `one2many`, `many2one`, `lost`, `missing`, `uncertain_loss`, or the
+catch-all `complex/many2many`. The orthology TSV has three columns:
+`query_cnee_id`, `partner_ref_cnees`, and `orthology_category`; non-query
+reference outcomes are written with `NA` as the query ID.
+
+Reference CNEE identity is tracked internally by the unique `cnee_uid`, not the
+display `cnee_id` (BED column 4), so two BED intervals that happen to share a
+name are never merged into one reference locus; `partner_ref_cnees` and the
+summary TSV report `cnee_uid` values, which match `cnee_id` unless the input
+BED has duplicate names. Parsing a BED with duplicate names emits a warning.
+
+The workflow also writes an exploratory flanking-synteny verification table at
+`overlap_stats.synteny.tsv`. This table reports weak all-mode projections,
+`lost` and `uncertain_loss` candidates, and a capped sample of `one2one`
+positive controls. Use `--synteny-flank-size` to set the reference bases
+upstream and downstream of each CNEE, and `--synteny-max-one2one-controls` to
+control the maximum number of one2one rows, default `50000`.
 
 When both `--ref-fasta` and `--query-fasta` are supplied, the stats and summary
 also include direct chain-aligned sequence identity and mismatch counts. These

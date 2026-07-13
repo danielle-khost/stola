@@ -10,7 +10,7 @@ from pathlib import Path
 from .bed import parse_bed
 
 SUMMARY_COLUMNS = [
-    "cnee_id",
+    "cnee_uid",
     "projection_status",
     "num_query_alignments",
     "overlap_fractions",
@@ -22,7 +22,7 @@ SUMMARY_COLUMNS = [
 
 @dataclass
 class CneeSummary:
-    cnee_id: str
+    cnee_uid: str
     overlap_fractions: list[str] = field(default_factory=list)
     gap_bases: list[str] = field(default_factory=list)
     sequence_identities: list[str] = field(default_factory=list)
@@ -55,7 +55,7 @@ class CneeSummary:
     def row(self) -> dict[str, str | int]:
         # Convert collected per-CNEE values into the output TSV row shape.
         return {
-            "cnee_id": self.cnee_id,
+            "cnee_uid": self.cnee_uid,
             "projection_status": self.projection_status,
             "num_query_alignments": self.num_query_alignments,
             "overlap_fractions": ",".join(self.overlap_fractions),
@@ -88,9 +88,9 @@ def summarize_overlap_stats(
     if cnee_bed is not None:
         for interval in parse_bed(cnee_bed):
             summaries.setdefault(
-                interval.cnee_id,
+                interval.cnee_uid,
                 CneeSummary(
-                    cnee_id=interval.cnee_id,
+                    cnee_uid=interval.cnee_uid,
                     solid_only=solid_only,
                     require_solid_reference=require_solid_reference,
                 ),
@@ -99,7 +99,7 @@ def summarize_overlap_stats(
     with Path(stats_path).open("r", encoding="utf-8", newline="") as in_handle:
         reader = csv.DictReader(in_handle, delimiter="\t")
         required = {
-            "cnee_id",
+            "cnee_uid",
             "aligned_bases",
             "covered_fraction",
             "gap_bases_within_chain_span",
@@ -110,11 +110,11 @@ def summarize_overlap_stats(
         if missing:
             raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
         for row in reader:
-            cnee_id = row["cnee_id"]
+            cnee_uid = row["cnee_uid"]
             summary = summaries.setdefault(
-                cnee_id,
+                cnee_uid,
                 CneeSummary(
-                    cnee_id=cnee_id,
+                    cnee_uid=cnee_uid,
                     solid_only=solid_only,
                     require_solid_reference=require_solid_reference,
                 ),
@@ -135,7 +135,7 @@ def summarize_overlap_stats(
     with Path(stats_path).open("r", encoding="utf-8", newline="") as in_handle:
         reader = csv.DictReader(in_handle, delimiter="\t")
         for row in reader:
-            summary = summaries[row["cnee_id"]]
+            summary = summaries[row["cnee_uid"]]
             aligned_bases = int(row["aligned_bases"])
             if aligned_only and aligned_bases <= 0:
                 continue

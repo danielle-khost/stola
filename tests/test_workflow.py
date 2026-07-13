@@ -3,6 +3,7 @@ import gzip
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -216,17 +217,17 @@ class WorkflowTests(unittest.TestCase):
             rows = _read_tsv(summary)
 
         self.assertEqual(count, 3)
-        self.assertEqual(rows[0]["cnee_id"], "CNEE_PARTIAL")
+        self.assertEqual(rows[0]["cnee_uid"], "CNEE_PARTIAL")
         self.assertEqual(rows[0]["projection_status"], "aligned")
         self.assertEqual(rows[0]["num_query_alignments"], "2")
         self.assertEqual(rows[0]["overlap_fractions"], "1.0,0.5833333333333334")
         self.assertEqual(rows[0]["gap_bases"], "0,50")
-        self.assertEqual(rows[1]["cnee_id"], "CNEE_GAPPED")
+        self.assertEqual(rows[1]["cnee_uid"], "CNEE_GAPPED")
         self.assertEqual(rows[1]["projection_status"], "lost")
         self.assertEqual(rows[1]["num_query_alignments"], "0")
         self.assertEqual(rows[1]["overlap_fractions"], "")
         self.assertEqual(rows[1]["gap_bases"], "")
-        self.assertEqual(rows[2]["cnee_id"], "CNEE_NO_CHAIN")
+        self.assertEqual(rows[2]["cnee_uid"], "CNEE_NO_CHAIN")
         self.assertEqual(rows[2]["projection_status"], "missing")
         self.assertEqual(rows[2]["num_query_alignments"], "0")
 
@@ -242,7 +243,7 @@ class WorkflowTests(unittest.TestCase):
                 encoding="utf-8",
             )
             stats.write_text(
-                "cnee_id\taligned_bases\tcovered_fraction\t"
+                "cnee_uid\taligned_bases\tcovered_fraction\t"
                 "gap_bases_within_chain_span\tgap_fraction_within_chain_span\t"
                 "seq_identity\n"
                 "CNEE_SOLID_PLUS_WEAK\t50\t1.0\t0\t0.05\t0.8\n"
@@ -259,7 +260,7 @@ class WorkflowTests(unittest.TestCase):
                 min_sequence_identity=0.7,
                 max_fraction_gap=0.1,
             )
-            rows = {row["cnee_id"]: row for row in _read_tsv(summary)}
+            rows = {row["cnee_uid"]: row for row in _read_tsv(summary)}
 
         self.assertEqual(count, 2)
         self.assertEqual(rows["CNEE_SOLID_PLUS_WEAK"]["projection_status"], "aligned")
@@ -305,6 +306,7 @@ class WorkflowTests(unittest.TestCase):
             strict_orthology_rows = _read_tsv(
                 tmp_path / "overlap_stats.strict.orthology.tsv"
             )
+            synteny_rows = _read_tsv(tmp_path / "overlap_stats.synteny.tsv")
 
         self.assertEqual(result.chain_count, 3)
         self.assertEqual(result.candidate_count, 3)
@@ -316,12 +318,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.strict_summary_count, 3)
         self.assertEqual(result.orthology_result.orthology_rows, 4)
         self.assertEqual(result.strict_orthology_result.orthology_rows, 3)
+        self.assertEqual(result.synteny_result.rows, 2)
         self.assertEqual(len(stats_rows), 3)
         self.assertEqual(len(strict_stats_rows), 1)
         self.assertEqual(len(summary_rows), 3)
         self.assertEqual(len(strict_summary_rows), 3)
         self.assertEqual(len(orthology_rows), 4)
         self.assertEqual(len(strict_orthology_rows), 3)
+        self.assertEqual(len(synteny_rows), 2)
         self.assertEqual(
             list(orthology_rows[0]),
             ["query_cnee_id", "partner_ref_cnees", "orthology_category"],
@@ -357,19 +361,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(na_categories["CNEE_GAPPED"], "lost")
         self.assertEqual(na_categories["CNEE_NO_CHAIN"], "missing")
         summary_statuses = {
-            row["cnee_id"]: row["projection_status"] for row in summary_rows
+            row["cnee_uid"]: row["projection_status"] for row in summary_rows
         }
         self.assertEqual(summary_statuses["CNEE_GAPPED"], "lost")
         self.assertEqual(summary_statuses["CNEE_NO_CHAIN"], "missing")
         strict_summary_by_id = {
-            row["cnee_id"]: row for row in strict_summary_rows
+            row["cnee_uid"]: row for row in strict_summary_rows
         }
         self.assertEqual(
             strict_summary_by_id["CNEE_PARTIAL"]["num_query_alignments"], "1"
         )
         self.assertEqual(strict_summary_by_id["CNEE_PARTIAL"]["projection_status"], "aligned")
+        synteny_statuses = {row["orthology_status"] for row in synteny_rows}
+        self.assertEqual(synteny_statuses, {"weak", "lost"})
+        self.assertIn(
+            "q_CNEE_PARTIAL_1",
+            {row["cnee_id"] for row in synteny_rows if row["orthology_status"] == "weak"},
+        )
 
-    def test_orthology_graph_edges_store_sequence_identity_and_gap_fraction(self) -> None:
+    def test_orthology_graph_edges_store_per_projection_metrics_and_require_single_projection_solid(
+        self,
+    ) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
         import networkx as nx
@@ -377,6 +389,7 @@ class WorkflowTests(unittest.TestCase):
         from toga4cnee.orthology import (
             _build_orthology_graph,
             _cluster_query_projections,
+            _edge_is_solid,
             _read_projection_evidence,
             _ref_node,
         )
@@ -387,7 +400,7 @@ class WorkflowTests(unittest.TestCase):
             stats.write_text(
                 "\t".join(
                     [
-                        "cnee_id",
+                        "cnee_uid",
                         "aligned_bases",
                         "query_chrom",
                         "query_strand",
@@ -399,8 +412,10 @@ class WorkflowTests(unittest.TestCase):
                     ]
                 )
                 + "\n"
-                + "CNEE_A\t50\tchrQ\t+\t100\t150\tA#1\t0.5\t0.4\n"
-                + "CNEE_A\t75\tchrQ\t+\t120\t180\tA#2\t0.1\t0.9\n"
+                # Good identity but bad gap on its own.
+                + "CNEE_A\t50\tchrQ\t+\t100\t150\tA#1\t0.5\t0.9\n"
+                # Good gap but bad identity on its own.
+                + "CNEE_A\t45\tchrQ\t+\t120\t180\tA#2\t0.05\t0.3\n"
                 + "CNEE_B\t40\tchrQ\t+\t300\t340\tB#1\t0.25\t.\n",
                 encoding="utf-8",
             )
@@ -410,13 +425,17 @@ class WorkflowTests(unittest.TestCase):
             graph = _build_orthology_graph(nx, ["CNEE_A", "CNEE_B"], clusters)
 
         edge_a = graph.edges[_ref_node("CNEE_A"), "query:000001"]
-        self.assertEqual(edge_a["sequence_identity"], 0.9)
-        self.assertEqual(edge_a["fraction_gap"], 0.1)
+        self.assertEqual(edge_a["projection_metrics"], [(0.9, 0.5), (0.3, 0.05)])
         self.assertEqual(edge_a["projection_count"], 2)
+        # Blending would give (max identity 0.9, min gap 0.05), which passes
+        # both thresholds -- but no single projection does, so the edge must
+        # not be solid.
+        self.assertFalse(
+            _edge_is_solid(edge_a, min_sequence_identity=0.7, max_fraction_gap=0.1)
+        )
 
         edge_b = graph.edges[_ref_node("CNEE_B"), "query:000002"]
-        self.assertIsNone(edge_b["sequence_identity"])
-        self.assertEqual(edge_b["fraction_gap"], 0.25)
+        self.assertEqual(edge_b["projection_metrics"], [(None, 0.25)])
         self.assertEqual(edge_b["projection_count"], 1)
 
     def test_orthology_classification_uses_solid_edges_only(self) -> None:
@@ -446,7 +465,7 @@ class WorkflowTests(unittest.TestCase):
             stats.write_text(
                 "\t".join(
                     [
-                        "cnee_id",
+                        "cnee_uid",
                         "aligned_bases",
                         "query_chrom",
                         "query_strand",
@@ -499,6 +518,186 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(na_categories["CNEE_GAP_ONLY"], "lost")
         self.assertEqual(na_categories["CNEE_MISSING"], "missing")
 
+    def test_orthology_falls_back_to_uncertain_loss_when_no_single_projection_is_solid(
+        self,
+    ) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from toga4cnee.orthology import classify_orthology
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bed = tmp_path / "cnees.bed"
+            stats = tmp_path / "stats.tsv"
+            orthology = tmp_path / "orthology.tsv"
+            query_bed = tmp_path / "query.bed"
+            bed.write_text("chr1\t0\t50\tCNEE_A\n", encoding="utf-8")
+            stats.write_text(
+                "\t".join(
+                    [
+                        "cnee_uid",
+                        "aligned_bases",
+                        "query_chrom",
+                        "query_strand",
+                        "query_aligned_start",
+                        "query_aligned_end",
+                        "query_projection_name",
+                        "gap_fraction_within_chain_span",
+                        "seq_identity",
+                    ]
+                )
+                + "\n"
+                # Good identity, bad gap on its own.
+                + "CNEE_A\t50\tchrQ\t+\t100\t150\tA#1\t0.5\t0.9\n"
+                # Good gap, bad identity on its own. Same query cluster as A#1
+                # (overlapping query coordinates) so both land on one edge.
+                + "CNEE_A\t45\tchrQ\t+\t120\t180\tA#2\t0.05\t0.3\n",
+                encoding="utf-8",
+            )
+
+            result = classify_orthology(
+                stats,
+                bed,
+                orthology,
+                query_bed,
+                min_sequence_identity=0.7,
+                max_fraction_gap=0.1,
+            )
+            rows = _read_tsv(orthology)
+
+        # Blending would give (max identity 0.9, min gap 0.05), which passes
+        # both thresholds. Neither projection alone does, so CNEE_A must not
+        # be called orthologous -- it falls back to uncertain_loss.
+        self.assertEqual(result.query_bed_rows, 0)
+        self.assertEqual(result.orthology_rows, 1)
+        na_categories = {
+            row["partner_ref_cnees"]: row["orthology_category"]
+            for row in rows
+            if row["query_cnee_id"] == "NA"
+        }
+        self.assertEqual(na_categories["CNEE_A"], "uncertain_loss")
+
+    def test_duplicate_cnee_ids_are_kept_distinct_via_cnee_uid(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from toga4cnee.orthology import classify_orthology
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bed = tmp_path / "cnees.bed"
+            stats = tmp_path / "stats.tsv"
+            summary = tmp_path / "summary.tsv"
+            orthology = tmp_path / "orthology.tsv"
+            query_bed = tmp_path / "query.bed"
+            # Two distinct loci that happen to share a display name.
+            bed.write_text(
+                "chr1\t0\t50\tCNEE_DUP\nchr1\t100\t150\tCNEE_DUP\n",
+                encoding="utf-8",
+            )
+            stats.write_text(
+                "\t".join(
+                    [
+                        "cnee_uid",
+                        "aligned_bases",
+                        "covered_fraction",
+                        "gap_bases_within_chain_span",
+                        "query_chrom",
+                        "query_strand",
+                        "query_aligned_start",
+                        "query_aligned_end",
+                        "query_projection_name",
+                        "gap_fraction_within_chain_span",
+                        "seq_identity",
+                    ]
+                )
+                + "\n"
+                + "CNEE_DUP\t50\t1.0\t0\tchrQ\t+\t100\t150\tD1#1\t0.05\t0.8\n"
+                + "CNEE_DUP__line2\t50\t1.0\t0\tchrQ\t+\t500\t550\tD2#1\t0.05\t0.8\n",
+                encoding="utf-8",
+            )
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = classify_orthology(
+                    stats,
+                    bed,
+                    orthology,
+                    query_bed,
+                    min_sequence_identity=0.7,
+                    max_fraction_gap=0.1,
+                )
+                summarize_overlap_stats(stats, summary, cnee_bed=bed)
+
+            orthology_rows = _read_tsv(orthology)
+            summary_rows = _read_tsv(summary)
+
+        self.assertTrue(
+            any("not unique" in str(w.message) for w in caught),
+            "expected a duplicate cnee_id warning",
+        )
+        self.assertEqual(result.query_bed_rows, 2)
+        categories_by_query = {
+            row["query_cnee_id"]: row["orthology_category"] for row in orthology_rows
+        }
+        self.assertEqual(categories_by_query["q_CNEE_DUP"], "one2one")
+        self.assertEqual(categories_by_query["q_CNEE_DUP__line2"], "one2one")
+        summary_uids = {row["cnee_uid"] for row in summary_rows}
+        self.assertEqual(summary_uids, {"CNEE_DUP", "CNEE_DUP__line2"})
+
+    def test_synteny_selection_caps_one2one_controls(self) -> None:
+        from toga4cnee.synteny import _select_synteny_targets
+
+        rows = [
+            {
+                "cnee_id": "CNEE_A",
+                "cnee_uid": "CNEE_A",
+                "aligned_bases": "10",
+                "gap_fraction_within_chain_span": "0.0",
+                "seq_identity": "1.0",
+                "query_chrom": "chrQ",
+                "query_aligned_start": "10",
+                "query_aligned_end": "20",
+            },
+            {
+                "cnee_id": "CNEE_B",
+                "cnee_uid": "CNEE_B",
+                "aligned_bases": "10",
+                "gap_fraction_within_chain_span": "0.0",
+                "seq_identity": "1.0",
+                "query_chrom": "chrQ",
+                "query_aligned_start": "30",
+                "query_aligned_end": "40",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            query_bed = tmp_path / "query.bed"
+            orthology = tmp_path / "orthology.tsv"
+            query_bed.write_text(
+                "chrQ\t10\t20\tq_CNEE_A\t0\t+\n"
+                "chrQ\t30\t40\tq_CNEE_B\t0\t+\n",
+                encoding="utf-8",
+            )
+            orthology.write_text(
+                "query_cnee_id\tpartner_ref_cnees\torthology_category\n"
+                "q_CNEE_A\tCNEE_A\tone2one\n"
+                "q_CNEE_B\tCNEE_B\tone2one\n",
+                encoding="utf-8",
+            )
+
+            targets = _select_synteny_targets(
+                rows,
+                query_bed,
+                orthology,
+                min_sequence_identity=0.7,
+                max_fraction_gap=0.1,
+                max_one2one_controls=1,
+            )
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].status, "one2one")
+        self.assertEqual(targets[0].output_id, "q_CNEE_A")
+
     def test_orthology_diagnostic_plots_use_category_groups(self) -> None:
         from toga4cnee.plots import write_orthology_diagnostic_plots
 
@@ -512,7 +711,7 @@ class WorkflowTests(unittest.TestCase):
             stats.write_text(
                 "\t".join(
                     [
-                        "cnee_id",
+                        "cnee_uid",
                         "aligned_bases",
                         "gap_fraction_within_chain_span",
                         "seq_identity",
@@ -572,14 +771,14 @@ class WorkflowTests(unittest.TestCase):
             seq_plot = tmp_path / "multi_seq.svg"
             gap_plot = tmp_path / "multi_gap.svg"
             summary.write_text(
-                "cnee_id\tnum_query_alignments\n"
+                "cnee_uid\tnum_query_alignments\n"
                 "CNEE_SINGLE\t1\n"
                 "CNEE_MULTI\t2\n"
                 "CNEE_ZERO\t0\n",
                 encoding="utf-8",
             )
             stats.write_text(
-                "cnee_id\tgap_fraction_within_chain_span\tseq_identity\n"
+                "cnee_uid\tgap_fraction_within_chain_span\tseq_identity\n"
                 "CNEE_SINGLE\t0.05\t0.9\n"
                 "CNEE_MULTI\t0.1\t0.8\n"
                 "CNEE_MULTI\t0.4\t.\n"
