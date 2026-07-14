@@ -6,13 +6,14 @@ import csv
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from .candidates import write_candidates
 from .index import build_index
 from .orthology import OrthologyResult, classify_orthology
 from .overlap import OVERLAP_COLUMNS, write_overlap_stats
 from .sequence_compare import SequenceComparator
-from .synteny import SyntenyResult, write_synteny_verification
+from .synteny import DEFAULT_FLANK_SIZES, SyntenyResult, write_synteny_verification
 from .summary import stats_row_is_solid, summarize_overlap_stats
 
 
@@ -52,7 +53,7 @@ def run_workflow(
     out_synteny: str | Path | None = None,
     ref_fasta: str | Path | None = None,
     query_fasta: str | Path | None = None,
-    synteny_flank_size: int = 10000,
+    synteny_flank_sizes: Sequence[int] = DEFAULT_FLANK_SIZES,
     synteny_max_one2one_controls: int = 50000,
     min_sequence_identity: float = 0.7,
     max_fraction_gap: float = 0.1,
@@ -60,8 +61,8 @@ def run_workflow(
 ) -> WorkflowResult:
     """Run indexing, candidate discovery, overlap stats, and query BED export."""
     # Normalize output paths, validate paired FASTA inputs, and choose a work dir.
-    if synteny_flank_size < 0:
-        raise ValueError("synteny_flank_size must be non-negative")
+    if not synteny_flank_sizes or any(size < 0 for size in synteny_flank_sizes):
+        raise ValueError("synteny_flank_sizes must be one or more non-negative values")
     if synteny_max_one2one_controls < 0:
         raise ValueError("synteny_max_one2one_controls must be non-negative")
     if (ref_fasta is None) != (query_fasta is None):
@@ -128,7 +129,7 @@ def run_workflow(
                 out_synteny_path,
                 ref_fasta,
                 query_fasta,
-                synteny_flank_size,
+                synteny_flank_sizes,
                 synteny_max_one2one_controls,
                 min_sequence_identity,
                 max_fraction_gap,
@@ -151,7 +152,7 @@ def run_workflow(
         out_synteny_path,
         ref_fasta,
         query_fasta,
-        synteny_flank_size,
+        synteny_flank_sizes,
         synteny_max_one2one_controls,
         min_sequence_identity,
         max_fraction_gap,
@@ -173,7 +174,7 @@ def _run_workflow_in_dir(
     out_synteny: Path,
     ref_fasta: str | Path | None,
     query_fasta: str | Path | None,
-    synteny_flank_size: int,
+    synteny_flank_sizes: Sequence[int],
     synteny_max_one2one_controls: int,
     min_sequence_identity: float,
     max_fraction_gap: float,
@@ -221,7 +222,7 @@ def _run_workflow_in_dir(
             out_bed,
             out_orthology,
             out_synteny,
-            flank_size=synteny_flank_size,
+            flank_sizes=synteny_flank_sizes,
             min_sequence_identity=min_sequence_identity,
             max_fraction_gap=max_fraction_gap,
             max_one2one_controls=synteny_max_one2one_controls,

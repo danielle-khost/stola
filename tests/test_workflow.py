@@ -337,14 +337,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.strict_summary_count, 3)
         self.assertEqual(result.orthology_result.orthology_rows, 4)
         self.assertEqual(result.strict_orthology_result.orthology_rows, 3)
-        self.assertEqual(result.synteny_result.rows, 2)
+        # 2 synteny candidates x 3 default flank sizes (10000, 1000, 100).
+        self.assertEqual(result.synteny_result.rows, 6)
         self.assertEqual(len(stats_rows), 3)
         self.assertEqual(len(strict_stats_rows), 1)
         self.assertEqual(len(summary_rows), 3)
         self.assertEqual(len(strict_summary_rows), 3)
         self.assertEqual(len(orthology_rows), 4)
         self.assertEqual(len(strict_orthology_rows), 3)
-        self.assertEqual(len(synteny_rows), 2)
+        self.assertEqual(len(synteny_rows), 6)
         self.assertEqual(
             list(orthology_rows[0]),
             ["query_cnee_id", "partner_ref_cnees", "orthology_category"],
@@ -393,9 +394,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(strict_summary_by_id["CNEE_PARTIAL"]["projection_status"], "aligned")
         synteny_statuses = {row["orthology_status"] for row in synteny_rows}
         self.assertEqual(synteny_statuses, {"weak", "lost"})
+        self.assertEqual(
+            {int(row["flank_size"]) for row in synteny_rows}, {10000, 1000, 100}
+        )
         self.assertIn(
             "q_CNEE_PARTIAL_1",
-            {row["cnee_id"] for row in synteny_rows if row["orthology_status"] == "weak"},
+            {row["cnee_uid"] for row in synteny_rows if row["orthology_status"] == "weak"},
         )
 
     def test_orthology_graph_edges_store_per_projection_metrics_and_require_single_projection_solid(
@@ -717,6 +721,53 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(categories_by_query["q_CNEE_DUP__line2"], "one2one")
         summary_uids = {row["cnee_uid"] for row in summary_rows}
         self.assertEqual(summary_uids, {"CNEE_DUP", "CNEE_DUP__line2"})
+
+    def test_synteny_verification_writes_long_format_rows_per_custom_flank_size(
+        self,
+    ) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from toga4cnee.synteny import write_synteny_verification
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            stats = tmp_path / "overlap_stats.tsv"
+            query_bed = tmp_path / "query_cnees.bed"
+            orthology = tmp_path / "orthology.tsv"
+            synteny = tmp_path / "synteny.tsv"
+
+            build_index(chain, index)
+            write_candidates(index, bed, candidates)
+            write_overlap_stats(index, candidates, stats)
+            from toga4cnee.orthology import classify_orthology
+
+            classify_orthology(stats, bed, orthology, query_bed, output_mode="all")
+
+            result = write_synteny_verification(
+                index,
+                stats,
+                query_bed,
+                orthology,
+                synteny,
+                flank_sizes=(500, 50),
+            )
+            rows = _read_tsv(synteny)
+
+        self.assertEqual(result.rows, len(rows))
+        self.assertGreater(result.rows, 0)
+        # Every candidate gets a row for each requested flank size, and only
+        # the requested sizes -- not the module default.
+        self.assertEqual(result.rows % 2, 0)
+        self.assertEqual({int(row["flank_size"]) for row in rows}, {500, 50})
+        cnee_uids = {row["cnee_uid"] for row in rows}
+        for cnee_uid in cnee_uids:
+            sizes_for_uid = {
+                int(row["flank_size"]) for row in rows if row["cnee_uid"] == cnee_uid
+            }
+            self.assertEqual(sizes_for_uid, {500, 50})
 
     def test_synteny_selection_caps_one2one_controls(self) -> None:
         from toga4cnee.synteny import _select_synteny_targets

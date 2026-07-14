@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .plots import write_qc_plots
 from .summary import summarize_overlap_stats
+from .synteny import DEFAULT_FLANK_SIZES
 from .workflow import run_workflow
 
 
@@ -37,7 +38,7 @@ def _run(args: argparse.Namespace) -> None:
         out_synteny=args.out_synteny,
         ref_fasta=args.ref_fasta,
         query_fasta=args.query_fasta,
-        synteny_flank_size=args.synteny_flank_size,
+        synteny_flank_sizes=args.synteny_flank_sizes,
         synteny_max_one2one_controls=args.synteny_max_one2one_controls,
         min_sequence_identity=args.min_sequence_identity,
         max_fraction_gap=args.max_fraction_gap,
@@ -175,10 +176,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Flanking-synteny verification TSV [default: OUT_STATS with .synteny before extension]",
     )
     run_parser.add_argument(
-        "--synteny-flank-size",
+        "--synteny-flank-sizes",
         type=int,
-        default=10000,
-        help="Reference bases upstream/downstream for flanking-synteny verification [default: 10000]",
+        nargs="+",
+        default=list(DEFAULT_FLANK_SIZES),
+        help=(
+            "One or more reference flank sizes (bases upstream/downstream) for "
+            "flanking-synteny verification; the output TSV gets one row per "
+            f"candidate per size [default: {list(DEFAULT_FLANK_SIZES)}]"
+        ),
     )
     run_parser.add_argument(
         "--synteny-max-one2one-controls",

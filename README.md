@@ -60,9 +60,13 @@ chain and always end up `missing`).
 The workflow also writes an exploratory flanking-synteny verification table at
 `overlap_stats.synteny.tsv`. This table reports weak all-mode projections,
 `lost` and `uncertain_loss` candidates, and a capped sample of `one2one`
-positive controls. Use `--synteny-flank-size` to set the reference bases
-upstream and downstream of each CNEE, and `--synteny-max-one2one-controls` to
-control the maximum number of one2one rows, default `50000`.
+positive controls. It is long-format: each candidate gets one row per
+requested flank size, with columns `cnee_uid`, `orthology_status`,
+`flank_size`, `flank_seq_identity`, and `flank_fraction_gap`. Use
+`--synteny-flank-sizes` (one or more values, default `10000 1000 100`) to set
+the reference bases upstream/downstream checked at each scale, and
+`--synteny-max-one2one-controls` to control the maximum number of one2one
+candidates, default `50000`.
 
 When both `--ref-fasta` and `--query-fasta` are supplied, the stats and summary
 also include direct chain-aligned sequence identity and mismatch counts. These

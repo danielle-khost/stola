@@ -20,7 +20,7 @@ try:
         query_bed_path="tests/test_runs/pigeonChickenStrict/query_cnees.bed",
         orthology_path="tests/test_runs/pigeonChickenStrict/overlap_stats.orthology.tsv",
         out_path="tests/test_runs/pigeonChickenStrict/overlap_stats.synteny.flank10000.tsv",
-        flank_size=10000,
+        flank_sizes=[10000],
         min_sequence_identity=0.7,
         max_fraction_gap=0.1,
         sequence_comparator=comparator,

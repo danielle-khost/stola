@@ -7,7 +7,7 @@ from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 from .chain import iter_chain_blocks
 from .index import load_index
@@ -15,12 +15,19 @@ from .models import ChainBlock, ChainRecord
 from .sequence_compare import SequenceComparator, aligned_segments_for_interval
 from .summary import stats_row_is_solid
 
+# cnee_uid holds the reference CNEE's cnee_uid for lost/uncertain_loss rows,
+# but a query-side ID for weak/one2one rows -- see SyntenyTarget.output_id.
 SYNTENY_COLUMNS = [
-    "cnee_id",
+    "cnee_uid",
     "orthology_status",
+    "flank_size",
     "flank_seq_identity",
     "flank_fraction_gap",
 ]
+
+# Verify synteny at several scales at once so results across scales can be
+# compared without rerunning the workflow.
+DEFAULT_FLANK_SIZES: tuple[int, ...] = (10000, 1000, 100)
 
 
 @dataclass(frozen=True)
@@ -71,16 +78,24 @@ def write_synteny_verification(
     query_bed_path: str | Path,
     orthology_path: str | Path,
     out_path: str | Path,
-    flank_size: int,
+    flank_sizes: Sequence[int] = DEFAULT_FLANK_SIZES,
     min_sequence_identity: float = 0.7,
     max_fraction_gap: float = 0.1,
     max_one2one_controls: int = 50000,
     sequence_comparator: SequenceComparator | None = None,
 ) -> SyntenyResult:
-    """Write flanking synteny metrics for weak/lost/uncertain projections."""
-    # Select rows to verify, calculate flank metrics, and write a compact TSV.
-    if flank_size < 0:
-        raise ValueError("flank_size must be non-negative")
+    """Write flanking synteny metrics for weak/lost/uncertain projections.
+
+    One row is written per candidate per requested flank size (long format),
+    so synteny support can be compared across scales in one output file.
+    """
+    # Select rows to verify, calculate flank metrics at each scale, and write
+    # a long-format TSV (one row per candidate x flank size).
+    if not flank_sizes:
+        raise ValueError("flank_sizes must include at least one value")
+    for flank_size in flank_sizes:
+        if flank_size < 0:
+            raise ValueError("flank_size must be non-negative")
     rows = _read_stats(stats_path)
     targets = _select_synteny_targets(
         rows,
@@ -114,22 +129,24 @@ def write_synteny_verification(
                     block_cache[chain_id] = BlockIndex.from_blocks(
                         iter_chain_blocks(chain_text)
                     )
-                flank_metrics = _flank_metrics(
-                    target.row,
-                    record,
-                    block_cache[chain_id],
-                    flank_size=flank_size,
-                    sequence_comparator=sequence_comparator,
-                )
-                writer.writerow(
-                    {
-                        "cnee_id": target.output_id,
-                        "orthology_status": target.status,
-                        "flank_seq_identity": flank_metrics["flank_seq_identity"],
-                        "flank_fraction_gap": flank_metrics["flank_fraction_gap"],
-                    }
-                )
-                count += 1
+                for flank_size in flank_sizes:
+                    flank_metrics = _flank_metrics(
+                        target.row,
+                        record,
+                        block_cache[chain_id],
+                        flank_size=flank_size,
+                        sequence_comparator=sequence_comparator,
+                    )
+                    writer.writerow(
+                        {
+                            "cnee_uid": target.output_id,
+                            "orthology_status": target.status,
+                            "flank_size": flank_size,
+                            "flank_seq_identity": flank_metrics["flank_seq_identity"],
+                            "flank_fraction_gap": flank_metrics["flank_fraction_gap"],
+                        }
+                    )
+                    count += 1
     return SyntenyResult(rows=count)
 
 
