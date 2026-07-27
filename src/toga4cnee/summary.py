@@ -41,7 +41,14 @@ class CneeSummary:
     @property
     def projection_status(self) -> str:
         # Distinguish aligned, gap-only/lost, and no-candidate/missing CNEEs.
-        if self.num_query_alignments > 0:
+        # With require_solid_reference, reported stats include every aligned
+        # row even for weak-only refs, so "aligned" must key off solid
+        # candidates specifically rather than num_query_alignments.
+        if self.require_solid_reference:
+            aligned = self.solid_candidate_count > 0
+        else:
+            aligned = self.num_query_alignments > 0
+        if aligned:
             return "aligned"
         if (
             (self.solid_only or self.require_solid_reference)
@@ -80,8 +87,10 @@ def summarize_overlap_stats(
     By default, only rows with at least one aligned CNEE base are counted as
     query alignments. With solid_only, only rows passing the solid-match
     thresholds are counted as query alignments. With require_solid_reference,
-    all aligned rows are counted for refs with at least one solid row, while
-    weak-only refs are retained as uncertain_loss context.
+    refs with at least one solid row are marked aligned and report every
+    aligned row's stats; weak-only refs are marked uncertain_loss but still
+    report their aligned rows' stats (overlap fraction, gap bases, etc.) as
+    context rather than being left blank.
     """
     # Aggregate overlap, gap, and sequence metrics by reference CNEE ID.
     summaries: OrderedDict[str, CneeSummary] = OrderedDict()
@@ -150,8 +159,9 @@ def summarize_overlap_stats(
             )
             if solid_only and not row_is_solid:
                 continue
-            if require_solid_reference and summary.solid_candidate_count == 0:
-                continue
+            # Weak-only refs under require_solid_reference still report their
+            # aligned rows' stats as uncertain_loss context (see
+            # projection_status above); only solid_only stays strict.
             summary.overlap_fractions.append(row["covered_fraction"])
             summary.gap_bases.append(row["gap_bases_within_chain_span"])
             seq_identity = row.get("seq_identity", ".")

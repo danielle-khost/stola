@@ -13,7 +13,12 @@ from .index import build_index
 from .orthology import OrthologyResult, classify_orthology
 from .overlap import OVERLAP_COLUMNS, write_overlap_stats
 from .sequence_compare import SequenceComparator
-from .synteny import DEFAULT_FLANK_SIZES, SyntenyResult, write_synteny_verification
+from .synteny import (
+    DEFAULT_FLANK_SIZES,
+    SyntenyResult,
+    write_synteny_neighbor_verification,
+    write_synteny_verification,
+)
 from .summary import stats_row_is_solid, summarize_overlap_stats
 
 
@@ -30,9 +35,11 @@ class WorkflowResult:
     orthology_result: OrthologyResult
     strict_orthology_result: OrthologyResult
     synteny_result: SyntenyResult
+    synteny_neighbor_result: SyntenyResult
     index_path: Path
     candidates_path: Path
     synteny_path: Path
+    synteny_neighbors_path: Path
     strict_stats_path: Path
     strict_summary_path: Path
     strict_bed_path: Path
@@ -51,6 +58,7 @@ def run_workflow(
     out_strict_summary: str | Path | None = None,
     out_strict_orthology: str | Path | None = None,
     out_synteny: str | Path | None = None,
+    out_synteny_neighbors: str | Path | None = None,
     ref_fasta: str | Path | None = None,
     query_fasta: str | Path | None = None,
     synteny_flank_sizes: Sequence[int] = DEFAULT_FLANK_SIZES,
@@ -103,6 +111,11 @@ def run_workflow(
         if out_synteny is not None
         else _add_suffix_before_extension(out_stats, ".synteny")
     )
+    out_synteny_neighbors_path = (
+        Path(out_synteny_neighbors)
+        if out_synteny_neighbors is not None
+        else _add_suffix_before_extension(out_stats, ".synteny_neighbors")
+    )
     out_bed.parent.mkdir(parents=True, exist_ok=True)
     out_stats.parent.mkdir(parents=True, exist_ok=True)
     out_summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +125,7 @@ def run_workflow(
     out_strict_summary_path.parent.mkdir(parents=True, exist_ok=True)
     out_strict_orthology_path.parent.mkdir(parents=True, exist_ok=True)
     out_synteny_path.parent.mkdir(parents=True, exist_ok=True)
+    out_synteny_neighbors_path.parent.mkdir(parents=True, exist_ok=True)
 
     if work_dir is None:
         with tempfile.TemporaryDirectory(prefix="toga4cnee_") as tmpdir:
@@ -127,6 +141,7 @@ def run_workflow(
                 out_strict_summary_path,
                 out_strict_orthology_path,
                 out_synteny_path,
+                out_synteny_neighbors_path,
                 ref_fasta,
                 query_fasta,
                 synteny_flank_sizes,
@@ -150,6 +165,7 @@ def run_workflow(
         out_strict_summary_path,
         out_strict_orthology_path,
         out_synteny_path,
+        out_synteny_neighbors_path,
         ref_fasta,
         query_fasta,
         synteny_flank_sizes,
@@ -172,6 +188,7 @@ def _run_workflow_in_dir(
     out_strict_summary: Path,
     out_strict_orthology: Path,
     out_synteny: Path,
+    out_synteny_neighbors: Path,
     ref_fasta: str | Path | None,
     query_fasta: str | Path | None,
     synteny_flank_sizes: Sequence[int],
@@ -221,12 +238,24 @@ def _run_workflow_in_dir(
             out_stats,
             out_bed,
             out_orthology,
+            cnee_bed,
             out_synteny,
             flank_sizes=synteny_flank_sizes,
             min_sequence_identity=min_sequence_identity,
             max_fraction_gap=max_fraction_gap,
             max_one2one_controls=synteny_max_one2one_controls,
             sequence_comparator=sequence_comparator,
+        )
+        synteny_neighbor_result = write_synteny_neighbor_verification(
+            index_path,
+            out_stats,
+            out_bed,
+            out_orthology,
+            cnee_bed,
+            out_synteny_neighbors,
+            min_sequence_identity=min_sequence_identity,
+            max_fraction_gap=max_fraction_gap,
+            max_one2one_controls=synteny_max_one2one_controls,
         )
         summary_count = summarize_overlap_stats(
             out_stats,
@@ -266,9 +295,11 @@ def _run_workflow_in_dir(
         orthology_result=orthology_result,
         strict_orthology_result=strict_orthology_result,
         synteny_result=synteny_result,
+        synteny_neighbor_result=synteny_neighbor_result,
         index_path=index_path,
         candidates_path=candidates_path,
         synteny_path=out_synteny,
+        synteny_neighbors_path=out_synteny_neighbors,
         strict_stats_path=out_strict_stats,
         strict_summary_path=out_strict_summary,
         strict_bed_path=out_strict_bed,

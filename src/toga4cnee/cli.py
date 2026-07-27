@@ -36,6 +36,7 @@ def _run(args: argparse.Namespace) -> None:
         out_strict_summary=args.out_strict_summary,
         out_strict_orthology=args.out_strict_orthology,
         out_synteny=args.out_synteny,
+        out_synteny_neighbors=args.out_synteny_neighbors,
         ref_fasta=args.ref_fasta,
         query_fasta=args.query_fasta,
         synteny_flank_sizes=args.synteny_flank_sizes,
@@ -71,6 +72,10 @@ def _run(args: argparse.Namespace) -> None:
     print(
         f"Wrote {result.synteny_result.rows} synteny verification rows -> "
         f"{result.synteny_path}"
+    )
+    print(
+        f"Wrote {result.synteny_neighbor_result.rows} synteny neighbor-check rows -> "
+        f"{result.synteny_neighbors_path}"
     )
     if args.work_dir is not None:
         print(f"Kept intermediates in {args.work_dir}")
@@ -174,6 +179,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Flanking-synteny verification TSV [default: OUT_STATS with .synteny before extension]",
+    )
+    run_parser.add_argument(
+        "--out-synteny-neighbors",
+        type=Path,
+        default=None,
+        help=(
+            "Left/right flanking-CNEE synteny check TSV [default: OUT_STATS with "
+            ".synteny_neighbors before extension]"
+        ),
     )
     run_parser.add_argument(
         "--synteny-flank-sizes",

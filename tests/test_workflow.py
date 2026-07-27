@@ -287,8 +287,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(rows["CNEE_SOLID_PLUS_WEAK"]["num_query_alignments"], "2")
         self.assertEqual(rows["CNEE_SOLID_PLUS_WEAK"]["overlap_fractions"], "1.0,0.5")
         self.assertEqual(rows["CNEE_WEAK_ONLY"]["projection_status"], "uncertain_loss")
-        self.assertEqual(rows["CNEE_WEAK_ONLY"]["num_query_alignments"], "0")
-        self.assertEqual(rows["CNEE_WEAK_ONLY"]["overlap_fractions"], "")
+        self.assertEqual(rows["CNEE_WEAK_ONLY"]["num_query_alignments"], "1")
+        self.assertEqual(rows["CNEE_WEAK_ONLY"]["overlap_fractions"], "0.5")
+        self.assertEqual(rows["CNEE_WEAK_ONLY"]["gap_bases"], "25")
 
     def test_single_workflow_writes_stats_and_query_bed(self) -> None:
         if not _has_networkx():
@@ -401,6 +402,12 @@ class WorkflowTests(unittest.TestCase):
             "q_CNEE_PARTIAL_1",
             {row["cnee_uid"] for row in synteny_rows if row["orthology_status"] == "weak"},
         )
+        # Every CNEE in this fixture is on its own chromosome.
+        for row in synteny_rows:
+            self.assertEqual(row["distance_to_nearest_cnee_neighbor"], ".")
+        for row in synteny_rows:
+            if row["orthology_status"] == "lost":
+                self.assertEqual(row["distance_to_nearest_aligned_block"], "25")
 
     def test_orthology_graph_edges_store_per_projection_metrics_and_require_single_projection_solid(
         self,
@@ -751,6 +758,7 @@ class WorkflowTests(unittest.TestCase):
                 stats,
                 query_bed,
                 orthology,
+                bed,
                 synteny,
                 flank_sizes=(500, 50),
             )
@@ -762,12 +770,61 @@ class WorkflowTests(unittest.TestCase):
         # the requested sizes -- not the module default.
         self.assertEqual(result.rows % 2, 0)
         self.assertEqual({int(row["flank_size"]) for row in rows}, {500, 50})
+        # _write_inputs puts every CNEE on its own chromosome, so none has a
+        # neighboring CNEE.
+        for row in rows:
+            self.assertEqual(row["distance_to_nearest_cnee_neighbor"], ".")
+        # CNEE_GAPPED sits entirely in chain 3's gap between blocks
+        # (100-150) and (250-300); it is 25 bases from each block edge.
+        lost_rows = [row for row in rows if row["orthology_status"] == "lost"]
+        self.assertTrue(lost_rows)
+        for row in lost_rows:
+            self.assertEqual(row["distance_to_nearest_aligned_block"], "25")
         cnee_uids = {row["cnee_uid"] for row in rows}
         for cnee_uid in cnee_uids:
             sizes_for_uid = {
                 int(row["flank_size"]) for row in rows if row["cnee_uid"] == cnee_uid
             }
             self.assertEqual(sizes_for_uid, {500, 50})
+
+    def test_distance_to_nearest_block_handles_overlap_and_gaps(self) -> None:
+        from toga4cnee.models import ChainBlock
+        from toga4cnee.synteny import BlockIndex, _distance_to_nearest_block
+
+        blocks = BlockIndex.from_blocks(
+            [
+                ChainBlock(ref_start=100, ref_end=150, query_start=0, query_end=50),
+                ChainBlock(ref_start=250, ref_end=300, query_start=50, query_end=100),
+            ]
+        )
+
+        self.assertEqual(_distance_to_nearest_block(blocks, 120, 140), 0)
+        self.assertEqual(_distance_to_nearest_block(blocks, 175, 225), 25)
+        self.assertEqual(_distance_to_nearest_block(blocks, 180, 200), 30)
+        self.assertEqual(_distance_to_nearest_block(blocks, 0, 50), 50)
+        self.assertEqual(_distance_to_nearest_block(blocks, 350, 400), 50)
+
+    def test_nearest_cnee_neighbor_distances_computes_gaps_on_same_chromosome(
+        self,
+    ) -> None:
+        from toga4cnee.synteny import _nearest_cnee_neighbor_distances
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bed = Path(tmpdir) / "cnees.bed"
+            bed.write_text(
+                "chr1\t0\t50\tA\n"
+                "chr1\t100\t150\tB\n"
+                "chr1\t500\t550\tC\n"
+                "chr2\t0\t10\tD\n",
+                encoding="utf-8",
+            )
+
+            distances = _nearest_cnee_neighbor_distances(bed)
+
+        self.assertEqual(distances["A"], 50)
+        self.assertEqual(distances["B"], 50)
+        self.assertEqual(distances["C"], 350)
+        self.assertIsNone(distances["D"])
 
     def test_synteny_selection_caps_one2one_controls(self) -> None:
         from toga4cnee.synteny import _select_synteny_targets
@@ -822,6 +879,417 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].status, "one2one")
         self.assertEqual(targets[0].output_id, "q_CNEE_A")
+
+    def test_ref_neighbor_index_directional_lookup_and_chromosome_edges(self) -> None:
+        from toga4cnee.synteny import RefNeighborIndex
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bed = Path(tmpdir) / "cnees.bed"
+            bed.write_text(
+                "chr1\t0\t50\tA\n"
+                "chr1\t100\t150\tB\n"
+                "chr1\t500\t550\tC\n"
+                "chr2\t0\t10\tD\n",
+                encoding="utf-8",
+            )
+            index = RefNeighborIndex.from_bed(bed)
+
+        self.assertEqual(index.neighbor("B", "left"), ("A", 50))
+        self.assertEqual(index.neighbor("B", "right"), ("C", 350))
+        self.assertEqual(index.neighbor("A", "left"), (None, None))
+        self.assertEqual(index.neighbor("C", "right"), (None, None))
+        self.assertEqual(index.neighbor("D", "left"), (None, None))
+        self.assertEqual(index.neighbor("D", "right"), (None, None))
+
+    def test_query_neighbor_index_directional_lookup(self) -> None:
+        from toga4cnee.synteny import QueryBedRecord, QueryNeighborIndex
+
+        by_chrom = {
+            "chrQ": [
+                QueryBedRecord(chrom="chrQ", start=0, end=50, query_id="qA"),
+                QueryBedRecord(chrom="chrQ", start=200, end=250, query_id="qB"),
+            ]
+        }
+        index = QueryNeighborIndex.from_records(by_chrom)
+
+        self.assertEqual(index.neighbor("chrQ", 100, "before"), ("qA", 50))
+        self.assertEqual(index.neighbor("chrQ", 100, "after"), ("qB", 100))
+        self.assertEqual(index.neighbor("chrQ", 10, "before"), (None, None))
+        self.assertEqual(index.neighbor("chrQ2", 10, "before"), (None, None))
+
+    def test_orthology_index_assigns_category_to_every_partner_ref(self) -> None:
+        from toga4cnee.synteny import OrthologyIndex
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orthology = Path(tmpdir) / "orthology.tsv"
+            orthology.write_text(
+                "query_cnee_id\tpartner_ref_cnees\torthology_category\n"
+                "q_many\tCNEE_X,CNEE_Y\tmany2one\n"
+                "NA\tCNEE_LOST\tlost\n",
+                encoding="utf-8",
+            )
+            index = OrthologyIndex.from_path(orthology)
+
+        self.assertEqual(index.category_by_ref_uid["CNEE_X"], "many2one")
+        self.assertEqual(index.category_by_ref_uid["CNEE_Y"], "many2one")
+        self.assertEqual(index.category_by_ref_uid["CNEE_LOST"], "lost")
+        self.assertEqual(index.category_by_query_id["q_many"], "many2one")
+        self.assertEqual(
+            index.ref_partners_by_query_id["q_many"], frozenset({"CNEE_X", "CNEE_Y"})
+        )
+        self.assertNotIn("NA", index.category_by_query_id)
+
+    def test_query_flank_anchors_own_interval_forward_and_reverse_strand(self) -> None:
+        from toga4cnee.models import ChainRecord
+        from toga4cnee.synteny import BlockIndex, _query_flank_anchors
+
+        blocks = BlockIndex.from_blocks([])
+        row = {
+            "query_aligned_start": "100",
+            "query_aligned_end": "200",
+            "ref_start": "0",
+            "ref_end": "50",
+        }
+
+        def _record(query_strand: str) -> ChainRecord:
+            return ChainRecord(
+                chain_id="1",
+                score=0,
+                ref_chrom="chr1",
+                ref_size=1000,
+                ref_strand="+",
+                ref_start=0,
+                ref_end=50,
+                query_chrom="chrQ",
+                query_size=1000,
+                query_strand=query_strand,
+                query_start=100,
+                query_end=200,
+                start_byte=0,
+                byte_length=0,
+            )
+
+        forward = _query_flank_anchors(row, _record("+"), blocks)
+        self.assertEqual(forward["left"], (100, "before"))
+        self.assertEqual(forward["right"], (200, "after"))
+
+        reverse = _query_flank_anchors(row, _record("-"), blocks)
+        self.assertEqual(reverse["left"], (200, "after"))
+        self.assertEqual(reverse["right"], (100, "before"))
+
+    def test_query_flank_anchors_interpolates_from_flanking_blocks_for_lost_candidates(
+        self,
+    ) -> None:
+        from toga4cnee.models import ChainBlock, ChainRecord
+        from toga4cnee.synteny import BlockIndex, _query_flank_anchors
+
+        blocks = BlockIndex.from_blocks(
+            [
+                ChainBlock(ref_start=0, ref_end=100, query_start=1000, query_end=1100),
+                ChainBlock(ref_start=300, ref_end=400, query_start=1200, query_end=1300),
+            ]
+        )
+        row = {
+            "query_aligned_start": ".",
+            "query_aligned_end": ".",
+            "ref_start": "200",
+            "ref_end": "250",
+        }
+
+        def _record(query_strand: str) -> ChainRecord:
+            return ChainRecord(
+                chain_id="1",
+                score=0,
+                ref_chrom="chr1",
+                ref_size=1000,
+                ref_strand="+",
+                ref_start=0,
+                ref_end=400,
+                query_chrom="chrQ",
+                query_size=1000,
+                query_strand=query_strand,
+                query_start=1000,
+                query_end=1300,
+                start_byte=0,
+                byte_length=0,
+            )
+
+        forward = _query_flank_anchors(row, _record("+"), blocks)
+        self.assertEqual(forward["left"], (1100, "before"))
+        self.assertEqual(forward["right"], (1200, "after"))
+
+        reverse = _query_flank_anchors(row, _record("-"), blocks)
+        self.assertEqual(reverse["left"], (1000, "after"))
+        self.assertEqual(reverse["right"], (1300, "before"))
+
+        # A gap at the very edge of the chain's own aligned span: no
+        # preceding block on the left, so that side is undeterminable
+        # regardless of strand.
+        edge_blocks = BlockIndex.from_blocks(
+            [ChainBlock(ref_start=300, ref_end=400, query_start=1200, query_end=1300)]
+        )
+        edge_row = {
+            "query_aligned_start": ".",
+            "query_aligned_end": ".",
+            "ref_start": "0",
+            "ref_end": "50",
+        }
+        edge_forward = _query_flank_anchors(edge_row, _record("+"), edge_blocks)
+        self.assertEqual(edge_forward["left"], (None, None))
+        self.assertEqual(edge_forward["right"], (1200, "after"))
+        edge_reverse = _query_flank_anchors(edge_row, _record("-"), edge_blocks)
+        self.assertEqual(edge_reverse["left"], (None, None))
+        self.assertEqual(edge_reverse["right"], (1300, "before"))
+
+    def _write_lost_candidate_fixture(self, tmp_path: Path) -> tuple[Path, Path]:
+        # A chain with a single gap (ref 100-300 <-> query 1100-1200) and three
+        # reference CNEEs: CNEE_A and CNEE_C flank the gap and align solidly to
+        # either side of it; CNEE_B sits entirely inside the gap ("lost").
+        chain_text = "\n".join(
+            [
+                "chain 100 chr1 1000 + 0 400 chrQ 1000 + 1000 1300 10",
+                "100 200 100",
+                "100",
+                "",
+            ]
+        )
+        chain = tmp_path / "gap.chain"
+        bed = tmp_path / "gap_cnees.bed"
+        chain.write_text(chain_text, encoding="utf-8")
+        bed.write_text(
+            "chr1\t0\t50\tCNEE_A\n"
+            "chr1\t200\t250\tCNEE_B\n"
+            "chr1\t350\t400\tCNEE_C\n",
+            encoding="utf-8",
+        )
+        return chain, bed
+
+    def test_synteny_neighbor_verification_matches_true_when_query_neighbors_are_ref_neighbors_orthologs(
+        self,
+    ) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from toga4cnee.orthology import classify_orthology
+        from toga4cnee.synteny import write_synteny_neighbor_verification
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = self._write_lost_candidate_fixture(tmp_path)
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            stats = tmp_path / "overlap_stats.tsv"
+            query_bed = tmp_path / "query_cnees.bed"
+            orthology = tmp_path / "orthology.tsv"
+            synteny_neighbors = tmp_path / "synteny_neighbors.tsv"
+
+            build_index(chain, index)
+            write_candidates(index, bed, candidates)
+            write_overlap_stats(index, candidates, stats)
+            classify_orthology(stats, bed, orthology, query_bed, output_mode="all")
+
+            result = write_synteny_neighbor_verification(
+                index, stats, query_bed, orthology, bed, synteny_neighbors
+            )
+            rows = _read_tsv(synteny_neighbors)
+
+        self.assertEqual(result.rows, len(rows))
+        by_flank = {
+            (row["cnee_uid"], row["flank"]): row
+            for row in rows
+            if row["orthology_status"] == "lost"
+        }
+        left = by_flank[("CNEE_B", "left")]
+        right = by_flank[("CNEE_B", "right")]
+
+        self.assertEqual(left["nearest_ref_cnee_id"], "CNEE_A")
+        self.assertEqual(left["distance_to_ref_cnee"], "150")
+        self.assertEqual(left["nearest_ref_cnee_status"], "one2one")
+        self.assertEqual(left["nearest_query_cnee_id"], "q_CNEE_A")
+        self.assertEqual(left["distance_to_query_cnee"], "50")
+        self.assertEqual(left["nearest_query_cnee_status"], "one2one")
+        self.assertEqual(left["synteny_matches"], "TRUE")
+
+        self.assertEqual(right["nearest_ref_cnee_id"], "CNEE_C")
+        self.assertEqual(right["distance_to_ref_cnee"], "100")
+        self.assertEqual(right["nearest_query_cnee_id"], "q_CNEE_C")
+        self.assertEqual(right["distance_to_query_cnee"], "50")
+        self.assertEqual(right["synteny_matches"], "TRUE")
+
+        # CNEE_B is "lost" -- no query projection exists at all.
+        self.assertEqual(left["ref_coordinates"], "chr1:200-250")
+        self.assertEqual(left["query_projection_id"], "NA")
+        self.assertEqual(left["query_projection_coordinates"], "NA")
+
+        # CNEE_A and CNEE_C are themselves solid one2one candidates (positive
+        # controls), each with a real graph-assigned query projection.
+        by_status = {row["cnee_uid"]: row for row in rows if row["orthology_status"] == "one2one"}
+        self.assertEqual(by_status["CNEE_A"]["ref_coordinates"], "chr1:0-50")
+        self.assertEqual(by_status["CNEE_A"]["query_projection_id"], "q_CNEE_A")
+        self.assertEqual(
+            by_status["CNEE_A"]["query_projection_coordinates"], "chrQ:1000-1050"
+        )
+        self.assertEqual(by_status["CNEE_C"]["query_projection_id"], "q_CNEE_C")
+        self.assertEqual(
+            by_status["CNEE_C"]["query_projection_coordinates"], "chrQ:1250-1300"
+        )
+
+    def test_candidate_query_projection_by_status(self) -> None:
+        from toga4cnee.synteny import SyntenyTarget, _candidate_query_projection
+
+        lost_target = SyntenyTarget(
+            row={
+                "query_aligned_start": ".",
+                "query_aligned_end": ".",
+                "query_chrom": "chrQ",
+                "query_projection_name": "CNEE_LOST#1",
+            },
+            status="lost",
+            output_id="CNEE_LOST",
+        )
+        self.assertEqual(_candidate_query_projection(lost_target), ("NA", "NA"))
+
+        uncertain_target = SyntenyTarget(
+            row={
+                "query_aligned_start": "100",
+                "query_aligned_end": "150",
+                "query_chrom": "chrQ",
+                "query_projection_name": "CNEE_UNC#2",
+            },
+            status="uncertain_loss",
+            output_id="CNEE_UNC",
+        )
+        self.assertEqual(
+            _candidate_query_projection(uncertain_target),
+            ("CNEE_UNC#2", "chrQ:100-150"),
+        )
+
+        weak_target = SyntenyTarget(
+            row={
+                "query_aligned_start": "200",
+                "query_aligned_end": "250",
+                "query_chrom": "chrQ",
+                "query_projection_name": "CNEE_WEAK#3",
+            },
+            status="weak",
+            output_id="q_CNEE_WEAK_1",
+        )
+        self.assertEqual(
+            _candidate_query_projection(weak_target),
+            ("q_CNEE_WEAK_1", "chrQ:200-250"),
+        )
+
+        one2one_target = SyntenyTarget(
+            row={
+                "query_aligned_start": "300",
+                "query_aligned_end": "350",
+                "query_chrom": "chrQ",
+                "query_projection_name": "CNEE_ONE#4",
+            },
+            status="one2one",
+            output_id="q_CNEE_ONE",
+        )
+        self.assertEqual(
+            _candidate_query_projection(one2one_target),
+            ("q_CNEE_ONE", "chrQ:300-350"),
+        )
+
+    def test_synteny_neighbor_verification_flags_mismatch_for_rearranged_query_neighbor(
+        self,
+    ) -> None:
+        from toga4cnee.synteny import write_synteny_neighbor_verification
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = self._write_lost_candidate_fixture(tmp_path)
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            stats = tmp_path / "overlap_stats.tsv"
+            query_bed = tmp_path / "query_cnees.bed"
+            orthology = tmp_path / "orthology.tsv"
+            synteny_neighbors = tmp_path / "synteny_neighbors.tsv"
+
+            build_index(chain, index)
+            write_candidates(index, bed, candidates)
+            write_overlap_stats(index, candidates, stats)
+
+            # Hand-author query BED/orthology so the query CNEE physically
+            # nearest the left side of CNEE_B's projected gap (q_WRONG, right
+            # where CNEE_A's ortholog would sit) is *not* actually derived
+            # from CNEE_A -- simulating a rearrangement. The right side stays
+            # a genuine match.
+            query_bed.write_text(
+                "chrQ\t1000\t1050\tq_WRONG\t0\t+\n"
+                "chrQ\t1250\t1300\tq_CNEE_C\t0\t+\n",
+                encoding="utf-8",
+            )
+            orthology.write_text(
+                "query_cnee_id\tpartner_ref_cnees\torthology_category\n"
+                "q_WRONG\tCNEE_OTHER\tone2one\n"
+                "q_CNEE_C\tCNEE_C\tone2one\n",
+                encoding="utf-8",
+            )
+
+            result = write_synteny_neighbor_verification(
+                index, stats, query_bed, orthology, bed, synteny_neighbors
+            )
+            rows = _read_tsv(synteny_neighbors)
+
+        self.assertEqual(result.rows, len(rows))
+        by_flank = {
+            (row["cnee_uid"], row["flank"]): row
+            for row in rows
+            if row["orthology_status"] == "lost"
+        }
+        left = by_flank[("CNEE_B", "left")]
+        right = by_flank[("CNEE_B", "right")]
+
+        self.assertEqual(left["nearest_ref_cnee_id"], "CNEE_A")
+        self.assertEqual(left["nearest_query_cnee_id"], "q_WRONG")
+        self.assertEqual(left["synteny_matches"], "FALSE")
+
+        self.assertEqual(right["nearest_ref_cnee_id"], "CNEE_C")
+        self.assertEqual(right["nearest_query_cnee_id"], "q_CNEE_C")
+        self.assertEqual(right["synteny_matches"], "TRUE")
+
+    def test_synteny_neighbor_verification_reports_dot_when_undeterminable(self) -> None:
+        from toga4cnee.synteny import write_synteny_neighbor_verification
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = self._write_lost_candidate_fixture(tmp_path)
+            index = tmp_path / "index.json"
+            candidates = tmp_path / "candidates.tsv"
+            stats = tmp_path / "overlap_stats.tsv"
+            query_bed = tmp_path / "query_cnees.bed"
+            orthology = tmp_path / "orthology.tsv"
+            synteny_neighbors = tmp_path / "synteny_neighbors.tsv"
+
+            build_index(chain, index)
+            write_candidates(index, bed, candidates)
+            write_overlap_stats(index, candidates, stats)
+            # No query BED / orthology rows at all -- every neighbor lookup
+            # comes up empty, so nothing can be resolved.
+            query_bed.write_text("", encoding="utf-8")
+            orthology.write_text(
+                "query_cnee_id\tpartner_ref_cnees\torthology_category\n",
+                encoding="utf-8",
+            )
+
+            result = write_synteny_neighbor_verification(
+                index, stats, query_bed, orthology, bed, synteny_neighbors
+            )
+            rows = _read_tsv(synteny_neighbors)
+
+        self.assertEqual(result.rows, len(rows))
+        lost_rows = [row for row in rows if row["orthology_status"] == "lost"]
+        self.assertTrue(lost_rows)
+        for row in lost_rows:
+            self.assertEqual(row["nearest_query_cnee_id"], ".")
+            self.assertEqual(row["distance_to_query_cnee"], ".")
+            self.assertEqual(row["nearest_query_cnee_status"], ".")
+            self.assertEqual(row["synteny_matches"], ".")
+            # Ref-side neighbors are independent of query data and still resolve.
+            self.assertIn(row["nearest_ref_cnee_id"], {"CNEE_A", "CNEE_C"})
 
     def test_orthology_diagnostic_plots_use_category_groups(self) -> None:
         from toga4cnee.plots import write_orthology_diagnostic_plots
