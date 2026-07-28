@@ -31,10 +31,8 @@ def _run(args: argparse.Namespace) -> None:
         args.out_stats,
         out_summary=out_summary,
         out_orthology=out_orthology,
-        out_strict_bed=args.out_strict_bed,
         out_strict_stats=args.out_strict_stats,
         out_strict_summary=args.out_strict_summary,
-        out_strict_orthology=args.out_strict_orthology,
         out_synteny=args.out_synteny,
         out_synteny_neighbors=args.out_synteny_neighbors,
         ref_fasta=args.ref_fasta,
@@ -43,6 +41,7 @@ def _run(args: argparse.Namespace) -> None:
         synteny_max_one2one_controls=args.synteny_max_one2one_controls,
         min_sequence_identity=args.min_sequence_identity,
         max_fraction_gap=args.max_fraction_gap,
+        synteny_check=not args.no_synteny_check,
         work_dir=args.work_dir,
     )
     print(f"Indexed {result.chain_count} chains")
@@ -51,18 +50,10 @@ def _run(args: argparse.Namespace) -> None:
         f"Wrote {result.strict_stats_count} strict overlap-stat rows -> "
         f"{result.strict_stats_path}"
     )
-    print(f"Wrote {result.query_bed_count} all query CNEE BED rows -> {args.out_bed}")
+    print(f"Wrote {result.query_bed_count} query CNEE BED rows -> {args.out_bed}")
     print(
-        f"Wrote {result.strict_query_bed_count} strict query CNEE BED rows -> "
-        f"{result.strict_bed_path}"
-    )
-    print(
-        f"Wrote {result.orthology_result.orthology_rows} all orthology rows -> "
+        f"Wrote {result.orthology_result.orthology_rows} orthology rows -> "
         f"{out_orthology}"
-    )
-    print(
-        f"Wrote {result.strict_orthology_result.orthology_rows} strict orthology rows -> "
-        f"{result.strict_orthology_path}"
     )
     print(f"Wrote {result.summary_count} all CNEE summary rows -> {out_summary}")
     print(
@@ -151,12 +142,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Graph-based orthology classification TSV [default: OUT_STATS with .orthology.tsv suffix]",
     )
     run_parser.add_argument(
-        "--out-strict-bed",
-        type=Path,
-        default=None,
-        help="Strict query CNEE BED [default: OUT_BED with .strict before extension]",
-    )
-    run_parser.add_argument(
         "--out-strict-stats",
         type=Path,
         default=None,
@@ -167,12 +152,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Strict per-reference-CNEE summary TSV [default: OUT_STATS with .strict.summary before extension]",
-    )
-    run_parser.add_argument(
-        "--out-strict-orthology",
-        type=Path,
-        default=None,
-        help="Strict graph-based orthology TSV [default: OUT_STATS with .strict.orthology before extension]",
     )
     run_parser.add_argument(
         "--out-synteny",
@@ -220,6 +199,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.1,
         help="Maximum gap fraction for a solid orthology edge [default: 0.1]",
+    )
+    run_parser.add_argument(
+        "--no-synteny-check",
+        action="store_true",
+        help=(
+            "Skip synteny verification/pruning of ambiguous orthology edges "
+            "(a non-solid single ref/query edge, or any edge in a one2many/"
+            "many2one/complex component). Categories are still assigned from "
+            "the unpruned graph, just without the extra quality gate."
+        ),
     )
     run_parser.add_argument(
         "--ref-fasta",

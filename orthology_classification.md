@@ -74,5 +74,26 @@ J -- "Yes" --> L["complex"]
 G -- "No" --> M{"Do all multiple query matches match only this ref?"}
 M -- "Yes" --> N["one2many"]
 M -- "No" --> L
+```
+
+# Orthology flowchart v2
+```mermaid
+flowchart TD
+
+A["For each ref CNEE"] --> B{"Does it overlap a chain?"}
+B -- "No" --> C["Missing"]
+B -- "Yes" --> D{"Does it have aligned query bases?"}
+D -- "No" --> E["Lost"]
+D -- "Yes" --> F{"Does it have exactly 1 query projection?"}
+F -- "Yes" --> G{"Does the 1 query match other refs?"}
+G -- "No" --> H{"Is it a solid projection?"}
+H -- "Yes" --> H1["one2one"]
+H -- "No" --> H2["one2one(weak)"]
+G -- "Yes" --> I{"Do those other refs match other queries?"}
+I -- "No" --> I1["many2one"]
+I -- "Yes" --> I2["complex"]
+F -- "No" --> J["Do all the multiple queries match only this ref?"]
+J -- "No" --> I2
+J -- "Yes" --> K["one2many"]
 
 ```

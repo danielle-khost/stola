@@ -29,11 +29,9 @@ class WorkflowResult:
     stats_count: int
     strict_stats_count: int
     query_bed_count: int
-    strict_query_bed_count: int
     summary_count: int
     strict_summary_count: int
     orthology_result: OrthologyResult
-    strict_orthology_result: OrthologyResult
     synteny_result: SyntenyResult
     synteny_neighbor_result: SyntenyResult
     index_path: Path
@@ -42,8 +40,6 @@ class WorkflowResult:
     synteny_neighbors_path: Path
     strict_stats_path: Path
     strict_summary_path: Path
-    strict_bed_path: Path
-    strict_orthology_path: Path
 
 
 def run_workflow(
@@ -53,10 +49,8 @@ def run_workflow(
     out_stats: str | Path,
     out_summary: str | Path | None = None,
     out_orthology: str | Path | None = None,
-    out_strict_bed: str | Path | None = None,
     out_strict_stats: str | Path | None = None,
     out_strict_summary: str | Path | None = None,
-    out_strict_orthology: str | Path | None = None,
     out_synteny: str | Path | None = None,
     out_synteny_neighbors: str | Path | None = None,
     ref_fasta: str | Path | None = None,
@@ -65,6 +59,7 @@ def run_workflow(
     synteny_max_one2one_controls: int = 50000,
     min_sequence_identity: float = 0.7,
     max_fraction_gap: float = 0.1,
+    synteny_check: bool = True,
     work_dir: str | Path | None = None,
 ) -> WorkflowResult:
     """Run indexing, candidate discovery, overlap stats, and query BED export."""
@@ -86,11 +81,6 @@ def run_workflow(
         if out_orthology is not None
         else out_stats.with_suffix(".orthology.tsv")
     )
-    out_strict_bed_path = (
-        Path(out_strict_bed)
-        if out_strict_bed is not None
-        else _add_suffix_before_extension(out_bed, ".strict")
-    )
     out_strict_stats_path = (
         Path(out_strict_stats)
         if out_strict_stats is not None
@@ -100,11 +90,6 @@ def run_workflow(
         Path(out_strict_summary)
         if out_strict_summary is not None
         else _add_suffix_before_extension(out_stats, ".strict.summary")
-    )
-    out_strict_orthology_path = (
-        Path(out_strict_orthology)
-        if out_strict_orthology is not None
-        else _add_suffix_before_extension(out_stats, ".strict.orthology")
     )
     out_synteny_path = (
         Path(out_synteny)
@@ -120,10 +105,8 @@ def run_workflow(
     out_stats.parent.mkdir(parents=True, exist_ok=True)
     out_summary_path.parent.mkdir(parents=True, exist_ok=True)
     out_orthology_path.parent.mkdir(parents=True, exist_ok=True)
-    out_strict_bed_path.parent.mkdir(parents=True, exist_ok=True)
     out_strict_stats_path.parent.mkdir(parents=True, exist_ok=True)
     out_strict_summary_path.parent.mkdir(parents=True, exist_ok=True)
-    out_strict_orthology_path.parent.mkdir(parents=True, exist_ok=True)
     out_synteny_path.parent.mkdir(parents=True, exist_ok=True)
     out_synteny_neighbors_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -136,10 +119,8 @@ def run_workflow(
                 out_stats,
                 out_summary_path,
                 out_orthology_path,
-                out_strict_bed_path,
                 out_strict_stats_path,
                 out_strict_summary_path,
-                out_strict_orthology_path,
                 out_synteny_path,
                 out_synteny_neighbors_path,
                 ref_fasta,
@@ -148,6 +129,7 @@ def run_workflow(
                 synteny_max_one2one_controls,
                 min_sequence_identity,
                 max_fraction_gap,
+                synteny_check,
                 Path(tmpdir),
             )
 
@@ -160,10 +142,8 @@ def run_workflow(
         out_stats,
         out_summary_path,
         out_orthology_path,
-        out_strict_bed_path,
         out_strict_stats_path,
         out_strict_summary_path,
-        out_strict_orthology_path,
         out_synteny_path,
         out_synteny_neighbors_path,
         ref_fasta,
@@ -172,6 +152,7 @@ def run_workflow(
         synteny_max_one2one_controls,
         min_sequence_identity,
         max_fraction_gap,
+        synteny_check,
         work_path,
     )
 
@@ -183,10 +164,8 @@ def _run_workflow_in_dir(
     out_stats: Path,
     out_summary: Path,
     out_orthology: Path,
-    out_strict_bed: Path,
     out_strict_stats: Path,
     out_strict_summary: Path,
-    out_strict_orthology: Path,
     out_synteny: Path,
     out_synteny_neighbors: Path,
     ref_fasta: str | Path | None,
@@ -195,6 +174,7 @@ def _run_workflow_in_dir(
     synteny_max_one2one_controls: int,
     min_sequence_identity: float,
     max_fraction_gap: float,
+    synteny_check: bool,
     work_dir: Path,
 ) -> WorkflowResult:
     # Execute the full workflow in order, keeping intermediates under work_dir.
@@ -218,20 +198,13 @@ def _run_workflow_in_dir(
         orthology_result = classify_orthology(
             out_stats,
             cnee_bed,
+            index_path,
             out_orthology,
             out_bed,
             min_sequence_identity=min_sequence_identity,
             max_fraction_gap=max_fraction_gap,
-            output_mode="all",
-        )
-        strict_orthology_result = classify_orthology(
-            out_stats,
-            cnee_bed,
-            out_strict_orthology,
-            out_strict_bed,
-            min_sequence_identity=min_sequence_identity,
-            max_fraction_gap=max_fraction_gap,
-            output_mode="strict",
+            synteny_check=synteny_check,
+            sequence_comparator=sequence_comparator,
         )
         synteny_result = write_synteny_verification(
             index_path,
@@ -289,11 +262,9 @@ def _run_workflow_in_dir(
         stats_count=stats_count,
         strict_stats_count=strict_stats_count,
         query_bed_count=orthology_result.query_bed_rows,
-        strict_query_bed_count=strict_orthology_result.query_bed_rows,
         summary_count=summary_count,
         strict_summary_count=strict_summary_count,
         orthology_result=orthology_result,
-        strict_orthology_result=strict_orthology_result,
         synteny_result=synteny_result,
         synteny_neighbor_result=synteny_neighbor_result,
         index_path=index_path,
@@ -302,8 +273,6 @@ def _run_workflow_in_dir(
         synteny_neighbors_path=out_synteny_neighbors,
         strict_stats_path=out_strict_stats,
         strict_summary_path=out_strict_summary,
-        strict_bed_path=out_strict_bed,
-        strict_orthology_path=out_strict_orthology,
     )
 
 

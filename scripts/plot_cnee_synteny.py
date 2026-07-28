@@ -63,10 +63,17 @@ except ImportError as exc:  # pragma: no cover - environment guard, not test log
         "`pip install .[viz]`)."
     ) from exc
 
-ALIGNED_CATEGORIES = {"one2one", "one2many", "many2one", "complex/many2many"}
+ALIGNED_CATEGORIES = {
+    "one2one",
+    "one2one(weak)",
+    "one2many",
+    "many2one",
+    "complex/many2many",
+}
 
 CATEGORY_COLORS = {
     "one2one": "#4CAF50",
+    "one2one(weak)": "#4CAF50",
     "one2many": "#9C27B0",
     "many2one": "#00BCD4",
     "complex/many2many": "#9E9E9E",
@@ -76,6 +83,7 @@ CATEGORY_COLORS = {
 }
 CATEGORY_LABELS = {
     "one2one": "one2one",
+    "one2one(weak)": "one2one (weak)",
     "one2many": "one2many",
     "many2one": "many2one",
     "complex/many2many": "complex",
@@ -85,6 +93,7 @@ CATEGORY_LABELS = {
 }
 CATEGORY_ORDER = [
     "one2one",
+    "one2one(weak)",
     "one2many",
     "many2one",
     "complex/many2many",

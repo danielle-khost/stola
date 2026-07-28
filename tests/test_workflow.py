@@ -317,14 +317,8 @@ class WorkflowTests(unittest.TestCase):
             summary_rows = _read_tsv(summary)
             orthology_rows = _read_tsv(orthology)
             strict_stats_rows = _read_tsv(tmp_path / "overlap_stats.strict.tsv")
-            strict_bed_lines = (tmp_path / "query_cnees.strict.bed").read_text(
-                encoding="utf-8"
-            ).splitlines()
             strict_summary_rows = _read_tsv(
                 tmp_path / "overlap_stats.strict.summary.tsv"
-            )
-            strict_orthology_rows = _read_tsv(
-                tmp_path / "overlap_stats.strict.orthology.tsv"
             )
             synteny_rows = _read_tsv(tmp_path / "overlap_stats.synteny.tsv")
 
@@ -332,21 +326,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.candidate_count, 3)
         self.assertEqual(result.stats_count, 3)
         self.assertEqual(result.strict_stats_count, 1)
-        self.assertEqual(result.query_bed_count, 2)
-        self.assertEqual(result.strict_query_bed_count, 1)
+        # CNEE_PARTIAL spans two candidate chains (chrQ, chrQ2), but only the
+        # chrQ2 one is solid (gap 0.0 vs 0.42 on chrQ) and CNEE_PARTIAL has no
+        # ref-neighbor at all (alone on chr1) to corroborate the weak one via
+        # synteny -- so that projection is pruned, leaving a single one2one
+        # query locus rather than a one2many pair.
+        self.assertEqual(result.query_bed_count, 1)
         self.assertEqual(result.summary_count, 3)
         self.assertEqual(result.strict_summary_count, 3)
-        self.assertEqual(result.orthology_result.orthology_rows, 4)
-        self.assertEqual(result.strict_orthology_result.orthology_rows, 3)
-        # 2 synteny candidates x 3 default flank sizes (10000, 1000, 100).
-        self.assertEqual(result.synteny_result.rows, 6)
+        self.assertEqual(result.orthology_result.orthology_rows, 3)
+        # 3 synteny candidates (one2one control + weak + lost) x 3 default
+        # flank sizes (10000, 1000, 100).
+        self.assertEqual(result.synteny_result.rows, 9)
         self.assertEqual(len(stats_rows), 3)
         self.assertEqual(len(strict_stats_rows), 1)
         self.assertEqual(len(summary_rows), 3)
         self.assertEqual(len(strict_summary_rows), 3)
-        self.assertEqual(len(orthology_rows), 4)
-        self.assertEqual(len(strict_orthology_rows), 3)
-        self.assertEqual(len(synteny_rows), 6)
+        self.assertEqual(len(orthology_rows), 3)
+        self.assertEqual(len(synteny_rows), 9)
         self.assertEqual(
             list(orthology_rows[0]),
             ["query_cnee_id", "partner_ref_cnees", "orthology_category"],
@@ -354,26 +351,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(
             bed_lines,
             [
-                "chrQ\t520\t590\tq_CNEE_PARTIAL_1\t0\t+",
-                "chrQ2\t770\t890\tq_CNEE_PARTIAL_2\t0\t-",
-            ],
-        )
-        self.assertEqual(
-            strict_bed_lines,
-            [
                 "chrQ2\t770\t890\tq_CNEE_PARTIAL\t0\t-",
             ],
         )
         categories = {
             row["query_cnee_id"]: row["orthology_category"] for row in orthology_rows
         }
-        self.assertEqual(categories["q_CNEE_PARTIAL_1"], "one2many")
-        self.assertEqual(categories["q_CNEE_PARTIAL_2"], "one2many")
-        strict_categories = {
-            row["query_cnee_id"]: row["orthology_category"]
-            for row in strict_orthology_rows
-        }
-        self.assertEqual(strict_categories["q_CNEE_PARTIAL"], "one2one")
+        self.assertEqual(categories["q_CNEE_PARTIAL"], "one2one")
         na_categories = {
             row["partner_ref_cnees"]: row["orthology_category"]
             for row in orthology_rows
@@ -394,12 +378,14 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(strict_summary_by_id["CNEE_PARTIAL"]["projection_status"], "aligned")
         synteny_statuses = {row["orthology_status"] for row in synteny_rows}
-        self.assertEqual(synteny_statuses, {"weak", "lost"})
+        self.assertEqual(synteny_statuses, {"one2one", "weak", "lost"})
         self.assertEqual(
             {int(row["flank_size"]) for row in synteny_rows}, {10000, 1000, 100}
         )
+        # The pruned (non-solid, unverifiable) chrQ projection never got a
+        # graph-assigned query id, so it's reported under its raw projection name.
         self.assertIn(
-            "q_CNEE_PARTIAL_1",
+            "CNEE_PARTIAL#1",
             {row["cnee_uid"] for row in synteny_rows if row["orthology_status"] == "weak"},
         )
         # Every CNEE in this fixture is on its own chromosome.
@@ -431,6 +417,9 @@ class WorkflowTests(unittest.TestCase):
                 "\t".join(
                     [
                         "cnee_uid",
+                        "ref_start",
+                        "ref_end",
+                        "chain_id",
                         "aligned_bases",
                         "query_chrom",
                         "query_strand",
@@ -443,10 +432,10 @@ class WorkflowTests(unittest.TestCase):
                 )
                 + "\n"
                 # Good identity but bad gap on its own.
-                + "CNEE_A\t50\tchrQ\t+\t100\t150\tA#1\t0.5\t0.9\n"
+                + "CNEE_A\t0\t50\t1\t50\tchrQ\t+\t100\t150\tA#1\t0.5\t0.9\n"
                 # Good gap but bad identity on its own.
-                + "CNEE_A\t45\tchrQ\t+\t120\t180\tA#2\t0.05\t0.3\n"
-                + "CNEE_B\t40\tchrQ\t+\t300\t340\tB#1\t0.25\t.\n",
+                + "CNEE_A\t0\t50\t1\t45\tchrQ\t+\t120\t180\tA#2\t0.05\t0.3\n"
+                + "CNEE_B\t100\t150\t2\t40\tchrQ\t+\t300\t340\tB#1\t0.25\t.\n",
                 encoding="utf-8",
             )
 
@@ -496,6 +485,9 @@ class WorkflowTests(unittest.TestCase):
                 "\t".join(
                     [
                         "cnee_uid",
+                        "ref_start",
+                        "ref_end",
+                        "chain_id",
                         "aligned_bases",
                         "query_chrom",
                         "query_strand",
@@ -507,31 +499,40 @@ class WorkflowTests(unittest.TestCase):
                     ]
                 )
                 + "\n"
-                + "CNEE_SOLID\t50\tchrQ\t+\t100\t150\tS#1\t0.05\t0.8\n"
-                + "CNEE_SEQ_MISSING\t50\tchrQ\t+\t300\t350\tM#1\t0.05\t.\n"
-                + "CNEE_NONSOLID\t50\tchrQ\t+\t500\t550\tN#1\t0.2\t0.5\n"
-                + "CNEE_GAP_ONLY\t0\tchrQ\t+\t.\t.\tG#1\t1.0\t.\n",
+                + "CNEE_SOLID\t0\t50\t1\t50\tchrQ\t+\t100\t150\tS#1\t0.05\t0.8\n"
+                + "CNEE_SEQ_MISSING\t100\t150\t2\t50\tchrQ\t+\t300\t350\tM#1\t0.05\t.\n"
+                + "CNEE_NONSOLID\t200\t250\t3\t50\tchrQ\t+\t500\t550\tN#1\t0.2\t0.5\n"
+                + "CNEE_GAP_ONLY\t300\t350\t4\t0\tchrQ\t+\t.\t.\tG#1\t1.0\t.\n",
                 encoding="utf-8",
             )
 
+            # synteny_check=False: this test is about the solid/non-solid
+            # distinction driving categorization, not the verification feature
+            # itself (covered separately), so pruning is disabled and the
+            # index path is never touched.
             result = classify_orthology(
                 stats,
                 bed,
+                tmp_path / "unused_index.json",
                 orthology,
                 query_bed,
                 min_sequence_identity=0.7,
                 max_fraction_gap=0.1,
+                synteny_check=False,
             )
             rows = _read_tsv(orthology)
             bed_lines = query_bed.read_text(encoding="utf-8").splitlines()
 
         self.assertEqual(result.orthology_rows, 5)
-        self.assertEqual(result.query_bed_rows, 2)
+        # CNEE_NONSOLID is now a real (weak) one2one query locus rather than
+        # a standalone uncertain_loss row -- it still gets a query CNEE id.
+        self.assertEqual(result.query_bed_rows, 3)
         self.assertEqual(
             bed_lines,
             [
                 "chrQ\t100\t150\tq_CNEE_SOLID\t0\t+",
                 "chrQ\t300\t350\tq_CNEE_SEQ_MISSING\t0\t+",
+                "chrQ\t500\t550\tq_CNEE_NONSOLID\t0\t+",
             ],
         )
         categories_by_query = {
@@ -539,16 +540,16 @@ class WorkflowTests(unittest.TestCase):
         }
         self.assertEqual(categories_by_query["q_CNEE_SOLID"], "one2one")
         self.assertEqual(categories_by_query["q_CNEE_SEQ_MISSING"], "one2one")
+        self.assertEqual(categories_by_query["q_CNEE_NONSOLID"], "one2one(weak)")
         na_categories = {
             row["partner_ref_cnees"]: row["orthology_category"]
             for row in rows
             if row["query_cnee_id"] == "NA"
         }
-        self.assertEqual(na_categories["CNEE_NONSOLID"], "uncertain_loss")
         self.assertEqual(na_categories["CNEE_GAP_ONLY"], "lost")
         self.assertEqual(na_categories["CNEE_MISSING"], "missing")
 
-    def test_orthology_falls_back_to_uncertain_loss_when_no_single_projection_is_solid(
+    def test_orthology_falls_back_to_one2one_weak_when_no_single_projection_is_solid(
         self,
     ) -> None:
         if not _has_networkx():
@@ -566,6 +567,9 @@ class WorkflowTests(unittest.TestCase):
                 "\t".join(
                     [
                         "cnee_uid",
+                        "ref_start",
+                        "ref_end",
+                        "chain_id",
                         "aligned_bases",
                         "query_chrom",
                         "query_strand",
@@ -578,34 +582,37 @@ class WorkflowTests(unittest.TestCase):
                 )
                 + "\n"
                 # Good identity, bad gap on its own.
-                + "CNEE_A\t50\tchrQ\t+\t100\t150\tA#1\t0.5\t0.9\n"
+                + "CNEE_A\t0\t50\t1\t50\tchrQ\t+\t100\t150\tA#1\t0.5\t0.9\n"
                 # Good gap, bad identity on its own. Same query cluster as A#1
                 # (overlapping query coordinates) so both land on one edge.
-                + "CNEE_A\t45\tchrQ\t+\t120\t180\tA#2\t0.05\t0.3\n",
+                + "CNEE_A\t0\t50\t1\t45\tchrQ\t+\t120\t180\tA#2\t0.05\t0.3\n",
                 encoding="utf-8",
             )
 
+            # synteny_check=False: no other CNEEs exist to verify against, and
+            # this test is specifically about the solid/non-solid distinction.
             result = classify_orthology(
                 stats,
                 bed,
+                tmp_path / "unused_index.json",
                 orthology,
                 query_bed,
                 min_sequence_identity=0.7,
                 max_fraction_gap=0.1,
+                synteny_check=False,
             )
             rows = _read_tsv(orthology)
 
         # Blending would give (max identity 0.9, min gap 0.05), which passes
-        # both thresholds. Neither projection alone does, so CNEE_A must not
-        # be called orthologous -- it falls back to uncertain_loss.
-        self.assertEqual(result.query_bed_rows, 0)
+        # both thresholds. Neither projection alone does, so the edge isn't
+        # solid -- but it's still the only ref/query pair here, so it's kept
+        # as a weak one2one call rather than dropped to uncertain_loss.
+        self.assertEqual(result.query_bed_rows, 1)
         self.assertEqual(result.orthology_rows, 1)
-        na_categories = {
-            row["partner_ref_cnees"]: row["orthology_category"]
-            for row in rows
-            if row["query_cnee_id"] == "NA"
+        categories_by_query = {
+            row["query_cnee_id"]: row["orthology_category"] for row in rows
         }
-        self.assertEqual(na_categories["CNEE_A"], "uncertain_loss")
+        self.assertEqual(categories_by_query["q_CNEE_A"], "one2one(weak)")
 
     def test_orthology_clustering_keeps_opposite_strand_overlaps_separate(self) -> None:
         if not _has_networkx():
@@ -626,6 +633,9 @@ class WorkflowTests(unittest.TestCase):
                 "\t".join(
                     [
                         "cnee_uid",
+                        "ref_start",
+                        "ref_end",
+                        "chain_id",
                         "aligned_bases",
                         "query_chrom",
                         "query_strand",
@@ -638,18 +648,20 @@ class WorkflowTests(unittest.TestCase):
                 )
                 + "\n"
                 # Same query coordinates, opposite strands, both solid.
-                + "CNEE_PLUS\t50\tchrQ\t+\t100\t150\tP#1\t0.05\t0.8\n"
-                + "CNEE_MINUS\t50\tchrQ\t-\t100\t150\tM#1\t0.05\t0.8\n",
+                + "CNEE_PLUS\t0\t50\t1\t50\tchrQ\t+\t100\t150\tP#1\t0.05\t0.8\n"
+                + "CNEE_MINUS\t100\t150\t2\t50\tchrQ\t-\t100\t150\tM#1\t0.05\t0.8\n",
                 encoding="utf-8",
             )
 
             result = classify_orthology(
                 stats,
                 bed,
+                tmp_path / "unused_index.json",
                 orthology,
                 query_bed,
                 min_sequence_identity=0.7,
                 max_fraction_gap=0.1,
+                synteny_check=False,
             )
             rows = _read_tsv(orthology)
 
@@ -683,6 +695,9 @@ class WorkflowTests(unittest.TestCase):
                 "\t".join(
                     [
                         "cnee_uid",
+                        "ref_start",
+                        "ref_end",
+                        "chain_id",
                         "aligned_bases",
                         "covered_fraction",
                         "gap_bases_within_chain_span",
@@ -696,8 +711,8 @@ class WorkflowTests(unittest.TestCase):
                     ]
                 )
                 + "\n"
-                + "CNEE_DUP\t50\t1.0\t0\tchrQ\t+\t100\t150\tD1#1\t0.05\t0.8\n"
-                + "CNEE_DUP__line2\t50\t1.0\t0\tchrQ\t+\t500\t550\tD2#1\t0.05\t0.8\n",
+                + "CNEE_DUP\t0\t50\t1\t50\t1.0\t0\tchrQ\t+\t100\t150\tD1#1\t0.05\t0.8\n"
+                + "CNEE_DUP__line2\t100\t150\t2\t50\t1.0\t0\tchrQ\t+\t500\t550\tD2#1\t0.05\t0.8\n",
                 encoding="utf-8",
             )
 
@@ -706,10 +721,12 @@ class WorkflowTests(unittest.TestCase):
                 result = classify_orthology(
                     stats,
                     bed,
+                    tmp_path / "unused_index.json",
                     orthology,
                     query_bed,
                     min_sequence_identity=0.7,
                     max_fraction_gap=0.1,
+                    synteny_check=False,
                 )
                 summarize_overlap_stats(stats, summary, cnee_bed=bed)
 
@@ -751,7 +768,7 @@ class WorkflowTests(unittest.TestCase):
             write_overlap_stats(index, candidates, stats)
             from toga4cnee.orthology import classify_orthology
 
-            classify_orthology(stats, bed, orthology, query_bed, output_mode="all")
+            classify_orthology(stats, bed, index, orthology, query_bed)
 
             result = write_synteny_verification(
                 index,
@@ -1085,7 +1102,7 @@ class WorkflowTests(unittest.TestCase):
             build_index(chain, index)
             write_candidates(index, bed, candidates)
             write_overlap_stats(index, candidates, stats)
-            classify_orthology(stats, bed, orthology, query_bed, output_mode="all")
+            classify_orthology(stats, bed, index, orthology, query_bed)
 
             result = write_synteny_neighbor_verification(
                 index, stats, query_bed, orthology, bed, synteny_neighbors

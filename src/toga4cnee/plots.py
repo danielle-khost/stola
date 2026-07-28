@@ -12,6 +12,7 @@ from .summary import stats_row_is_solid
 
 CATEGORY_ORDER = [
     "one2one",
+    "one2one(weak)",
     "one2many",
     "many2one",
     "complex/many2many",
@@ -622,6 +623,7 @@ def _grouped_density_svg(
     tick_count = 5
     colors = {
         "one2one": "#1f6feb",
+        "one2one(weak)": "#60a5fa",
         "one2many": "#0f766e",
         "many2one": "#a16207",
         "complex/many2many": "#7c3aed",
