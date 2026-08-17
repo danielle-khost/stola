@@ -6,6 +6,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from .orthology import (
+    DEFAULT_MIN_ALIGN_SCORE,
+    DEFAULT_MIN_NEIGHBOR_FRACTION,
+    DEFAULT_VERIFICATION_NUM_NEIGHBORS,
+)
 from .plots import write_qc_plots
 from .summary import summarize_overlap_stats
 from .synteny import DEFAULT_FLANK_SIZES
@@ -35,6 +40,7 @@ def _run(args: argparse.Namespace) -> None:
         out_strict_summary=args.out_strict_summary,
         out_synteny=args.out_synteny,
         out_synteny_neighbors=args.out_synteny_neighbors,
+        out_culled_projections=args.out_culled_projections,
         ref_fasta=args.ref_fasta,
         query_fasta=args.query_fasta,
         synteny_flank_sizes=args.synteny_flank_sizes,
@@ -42,6 +48,9 @@ def _run(args: argparse.Namespace) -> None:
         min_sequence_identity=args.min_sequence_identity,
         max_fraction_gap=args.max_fraction_gap,
         synteny_check=not args.no_synteny_check,
+        min_align_score=args.min_align_score,
+        min_neighbor_fraction=args.min_neighbor_fraction,
+        verification_num_neighbors=args.verification_num_neighbors,
         work_dir=args.work_dir,
     )
     print(f"Indexed {result.chain_count} chains")
@@ -67,6 +76,10 @@ def _run(args: argparse.Namespace) -> None:
     print(
         f"Wrote {result.synteny_neighbor_result.rows} synteny neighbor-check rows -> "
         f"{result.synteny_neighbors_path}"
+    )
+    print(
+        f"Wrote {result.orthology_result.culled_projection_rows} culled-projection rows -> "
+        f"{result.culled_projections_path}"
     )
     if args.work_dir is not None:
         print(f"Kept intermediates in {args.work_dir}")
@@ -169,6 +182,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_parser.add_argument(
+        "--out-culled-projections",
+        type=Path,
+        default=None,
+        help=(
+            "Per-projection log of synteny-verification prunes TSV [default: "
+            "OUT_STATS with .culled_projections before extension]"
+        ),
+    )
+    run_parser.add_argument(
         "--synteny-flank-sizes",
         type=int,
         nargs="+",
@@ -208,6 +230,35 @@ def build_parser() -> argparse.ArgumentParser:
             "(a non-solid single ref/query edge, or any edge in a one2many/"
             "many2one/complex component). Categories are still assigned from "
             "the unpruned graph, just without the extra quality gate."
+        ),
+    )
+    run_parser.add_argument(
+        "--min-align-score",
+        type=float,
+        default=DEFAULT_MIN_ALIGN_SCORE,
+        help=(
+            "Minimum align_score (this projection's sequence identity relative "
+            f"to the best in its connected component) to survive synteny "
+            f"verification [default: {DEFAULT_MIN_ALIGN_SCORE}]"
+        ),
+    )
+    run_parser.add_argument(
+        "--min-neighbor-fraction",
+        type=float,
+        default=DEFAULT_MIN_NEIGHBOR_FRACTION,
+        help=(
+            "Minimum fraction of trusted neighboring reference CNEEs whose own "
+            "query ortholog corroborates this projection's synteny, to survive "
+            f"verification [default: {DEFAULT_MIN_NEIGHBOR_FRACTION}]"
+        ),
+    )
+    run_parser.add_argument(
+        "--verification-num-neighbors",
+        type=int,
+        default=DEFAULT_VERIFICATION_NUM_NEIGHBORS,
+        help=(
+            "Number of trusted (solid one2one) reference-CNEE neighbors checked "
+            f"per flank during synteny verification [default: {DEFAULT_VERIFICATION_NUM_NEIGHBORS}]"
         ),
     )
     run_parser.add_argument(

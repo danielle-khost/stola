@@ -9,24 +9,32 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .bed import parse_bed
-from .chain import iter_chain_blocks
-from .index import load_index
-from .models import BedInterval
-from .sequence_compare import SequenceComparator, aligned_segments_for_interval
+from .sequence_compare import SequenceComparator
 from .summary import is_solid_match
-from .synteny import (
-    BlockIndex,
-    QueryBedRecord,
-    QueryNeighborIndex,
-    RefNeighborIndex,
-    _aligned_bases,
-)
+from .synteny import QueryBedRecord, QueryNeighborIndex, RefNeighborIndex
 
 ORTHOLOGY_COLUMNS = [
     "query_cnee_id",
     "partner_ref_cnees",
     "orthology_category",
 ]
+
+CULLED_PROJECTION_COLUMNS = [
+    "projection_name",
+    "ref_cnee_id",
+    "initial_orthology_category",
+    "query_chrom",
+    "query_start",
+    "query_end",
+    "sequence_identity",
+    "gap_fraction",
+]
+
+# Verification criteria v2 (see synteny_verification.md): retain a projection
+# only if it clears BOTH an align_score and a neighbor-ortholog-fraction bar.
+DEFAULT_MIN_ALIGN_SCORE = 0.5
+DEFAULT_MIN_NEIGHBOR_FRACTION = 0.5
+DEFAULT_VERIFICATION_NUM_NEIGHBORS = 5
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,12 @@ class Projection:
 class ProjectionEvidence:
     projections: list[Projection]
     refs_with_candidates: set[str]
+
+
+@dataclass(frozen=True)
+class CulledProjection:
+    projection: Projection
+    initial_orthology_category: str
 
 
 @dataclass
@@ -90,6 +104,7 @@ class QueryCluster:
 class OrthologyResult:
     orthology_rows: int
     query_bed_rows: int
+    culled_projection_rows: int
 
 
 def classify_orthology(
@@ -102,17 +117,45 @@ def classify_orthology(
     max_fraction_gap: float = 0.1,
     synteny_check: bool = True,
     sequence_comparator: SequenceComparator | None = None,
+    min_align_score: float = DEFAULT_MIN_ALIGN_SCORE,
+    min_neighbor_fraction: float = DEFAULT_MIN_NEIGHBOR_FRACTION,
+    verification_num_neighbors: int = DEFAULT_VERIFICATION_NUM_NEIGHBORS,
+    out_culled_projections: str | Path | None = None,
 ) -> OrthologyResult:
     """Classify query CNEE loci from overlap stats and write TSV/BED outputs.
 
     Builds a ref<->query graph from every aligned projection, then (unless
     synteny_check is False) verifies and prunes projections in ambiguous
-    categories -- a non-solid single ref/query edge ("putative one2one(weak)"),
-    or any edge inside a one2many/many2one/complex component -- using synteny
-    evidence from the reference/query neighbor annotations plus the aligned
-    chain itself. Query loci are re-clustered from the surviving projections
-    before final categories are assigned, so pruning can split a cluster that
-    was only held together by a since-removed projection.
+    categories -- a non-solid single ref/query edge (putative one2one(weak)),
+    or any edge inside a one2many/many2one/complex component. "lost" refs
+    (zero aligned query bases) are never part of this graph at all, so they
+    are never subject to verification -- that category needs different
+    criteria entirely and is deliberately left alone for now.
+
+    A projection survives verification only if BOTH:
+      - align_score (its own sequence identity relative to the best-scoring
+        projection anywhere in its connected component) exceeds
+        min_align_score, AND
+      - neighbor_fraction (the fraction of its nearest verification_num_neighbors
+        *trusted* reference-CNEE neighbors per flank -- i.e. refs that are
+        themselves a solid one2one and so can't be pruned -- whose own query
+        ortholog falls among this projection's nearest verification_num_neighbors
+        trusted query neighbors) exceeds min_neighbor_fraction. A projection
+        with no trusted neighbor on either flank fails this criterion
+        outright (no synteny evidence to confirm it).
+
+    Query loci are re-clustered from the surviving projections before final
+    categories are assigned, so pruning can split a cluster that was only
+    held together by a since-removed projection. A ref left with no
+    surviving query edge (but that did have some projection) is written to
+    out_orthology as "uncertain_loss"; if out_culled_projections is given,
+    every individual pruned projection is also logged there for tracking.
+
+    Any surviving single ref/query edge is reported as plain "one2one" --
+    once verification has run, a weak edge that survived is just as trusted
+    as one that was always solid, so the one2one(weak) label is dropped from
+    final output entirely (it still shows up as an *initial*, pre-pruning
+    category in out_culled_projections).
     """
     if min_sequence_identity < 0 or min_sequence_identity > 1:
         raise ValueError("min_sequence_identity must be between 0 and 1")
@@ -127,7 +170,6 @@ def classify_orthology(
         ) from exc
 
     ref_intervals = parse_bed(cnee_bed)
-    ref_by_uid = {interval.cnee_uid: interval for interval in ref_intervals}
     ref_ids = [interval.cnee_uid for interval in ref_intervals]
     evidence = _read_projection_evidence(stats_path)
     refs_with_any_projection = {projection.ref_id for projection in evidence.projections}
@@ -135,18 +177,19 @@ def classify_orthology(
     initial_clusters = _cluster_query_projections(evidence.projections)
     initial_graph = _build_orthology_graph(nx, ref_ids, initial_clusters)
 
+    culled: list[CulledProjection] = []
     if synteny_check:
-        surviving = _verify_and_prune_projections(
+        surviving, culled = _verify_and_prune_projections(
             nx,
             evidence.projections,
             initial_graph,
             initial_clusters,
-            ref_by_uid,
             cnee_bed,
-            index_path,
-            sequence_comparator,
             min_sequence_identity,
             max_fraction_gap,
+            min_align_score,
+            min_neighbor_fraction,
+            verification_num_neighbors,
         )
         final_clusters = _cluster_query_projections(surviving)
         final_graph = _build_orthology_graph(nx, ref_ids, final_clusters)
@@ -155,9 +198,7 @@ def classify_orthology(
         final_graph = initial_graph
 
     components = [set(component) for component in nx.connected_components(final_graph)]
-    _assign_orthology_categories(
-        components, final_clusters, final_graph, min_sequence_identity, max_fraction_gap
-    )
+    _assign_orthology_categories(components, final_clusters)
     orthology_count = _write_orthology_tsv(
         final_clusters,
         ref_ids,
@@ -166,7 +207,13 @@ def classify_orthology(
         out_orthology,
     )
     bed_count = _write_query_bed(final_clusters, out_query_bed)
-    return OrthologyResult(orthology_rows=orthology_count, query_bed_rows=bed_count)
+    if out_culled_projections is not None:
+        _write_culled_projections_tsv(culled, out_culled_projections)
+    return OrthologyResult(
+        orthology_rows=orthology_count,
+        query_bed_rows=bed_count,
+        culled_projection_rows=len(culled),
+    )
 
 
 def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
@@ -292,33 +339,13 @@ def _edge_is_solid(
 
 
 # --------------------------------------------------------------------------
-# Synteny verification: decide, per projection, whether it survives into the
-# final graph. Only applied to "ambiguous" categories -- a non-solid lone
+# Synteny verification (v2): decide, per projection, whether it survives into
+# the final graph. Only applied to "ambiguous" categories -- a non-solid lone
 # ref/query edge, or any edge inside a one2many/many2one/complex component --
-# a clean solid one2one edge is never second-guessed.
+# a clean solid one2one edge is never second-guessed, and "lost" refs (no
+# aligned query bases at all, so no Projection object exists for them) never
+# enter this graph in the first place.
 # --------------------------------------------------------------------------
-
-
-def _components_needing_verification(
-    nx, initial_graph, min_sequence_identity: float, max_fraction_gap: float
-) -> dict[str, bool]:
-    # Map every ref/query node to whether its component's edges need
-    # verification: exempt only a lone (1 ref, 1 query) component whose sole
-    # edge is already solid.
-    needs_verification: dict[str, bool] = {}
-    for component in nx.connected_components(initial_graph):
-        ref_nodes = [node for node in component if str(node).startswith("ref:")]
-        query_nodes = [node for node in component if str(node).startswith("query:")]
-        if not ref_nodes or not query_nodes:
-            continue
-        if len(ref_nodes) == 1 and len(query_nodes) == 1:
-            edge_data = initial_graph.edges[ref_nodes[0], query_nodes[0]]
-            verify = not _edge_is_solid(edge_data, min_sequence_identity, max_fraction_gap)
-        else:
-            verify = True
-        for node in component:
-            needs_verification[node] = verify
-    return needs_verification
 
 
 def _query_neighbor_index_from_clusters(clusters: list[QueryCluster]) -> QueryNeighborIndex:
@@ -332,86 +359,128 @@ def _query_neighbor_index_from_clusters(clusters: list[QueryCluster]) -> QueryNe
     return QueryNeighborIndex.from_records(by_chrom)
 
 
-def _verify_and_prune_projections(
-    nx,
-    projections: list[Projection],
-    initial_graph,
-    initial_clusters: list[QueryCluster],
-    ref_by_uid: dict[str, BedInterval],
-    cnee_bed: str | Path,
-    index_path: str | Path,
-    sequence_comparator: SequenceComparator | None,
-    min_sequence_identity: float,
-    max_fraction_gap: float,
-) -> list[Projection]:
-    needs_verification = _components_needing_verification(
-        nx, initial_graph, min_sequence_identity, max_fraction_gap
-    )
-    if not any(needs_verification.values()):
-        return list(projections)
+def _initial_verification_state(
+    nx, initial_graph, min_sequence_identity: float, max_fraction_gap: float
+) -> tuple[dict[str, str], set[str], dict[str, int]]:
+    """Categorize every ref from the raw, pre-pruning graph shape.
 
-    ref_neighbor_index = RefNeighborIndex.from_bed(cnee_bed)
-    query_neighbor_index = _query_neighbor_index_from_clusters(initial_clusters)
-    cluster_refs_by_query_node = {
-        cluster.node_id: frozenset(cluster.refs) for cluster in initial_clusters
-    }
-
-    payload, records = load_index(index_path)
-    chain_records_by_id = {record.chain_id: record for record in records}
-    chain_path = payload["indexed_chain_path"]
-    block_cache: dict[str, BlockIndex] = {}
-
-    surviving: list[Projection] = []
-    with Path(chain_path).open("rb") as chain_handle:
-        for projection in projections:
-            if not needs_verification.get(_ref_node(projection.ref_id), False):
-                surviving.append(projection)
-                continue
-            if _verify_projection(
-                projection,
-                ref_by_uid,
-                ref_neighbor_index,
-                query_neighbor_index,
-                cluster_refs_by_query_node,
-                chain_records_by_id,
-                chain_handle,
-                block_cache,
-                sequence_comparator,
-                min_sequence_identity,
-                max_fraction_gap,
-            ):
-                surviving.append(projection)
-    return surviving
-
-
-def _verify_projection(
-    projection: Projection,
-    ref_by_uid: dict[str, BedInterval],
-    ref_neighbor_index: RefNeighborIndex,
-    query_neighbor_index: QueryNeighborIndex,
-    cluster_refs_by_query_node: dict[str, frozenset[str]],
-    chain_records_by_id: dict,
-    chain_handle,
-    block_cache: dict[str, BlockIndex],
-    sequence_comparator: SequenceComparator | None,
-    min_sequence_identity: float,
-    max_fraction_gap: float,
-) -> bool:
-    """Score a projection against the 4 synteny-verification criteria.
-
-    Required passes generalizes the two explicitly-specified cases (2-of-4
-    normally, 1-of-3 when exactly one flank is missing) as roughly half of
-    whichever criteria are actually applicable: `applicable // 2`, floored at 1.
+    Returns (initial_category_by_ref, trusted_ref_ids, component_id_by_ref):
+    - initial_category_by_ref: the would-be category for every ref that needs
+      verification (one2one(weak)/one2many/many2one/complex/many2many).
+      Absence from this dict means the ref doesn't need verification at all
+      (a solid lone one2one edge, or a ref with no projections).
+    - trusted_ref_ids: refs NOT needing verification, i.e. already a solid
+      lone one2one edge. Per synteny_verification.md v2, only these are
+      eligible as synteny anchors for scoring *other* candidates -- a ref
+      that might itself get pruned can't vouch for one still being verified.
+    - component_id_by_ref: every ref's connected-component id in the initial
+      graph, so a projection's siblings (for align_score) can be gathered.
     """
-    applicable = 0
-    passed = 0
+    initial_category_by_ref: dict[str, str] = {}
+    trusted_ref_ids: set[str] = set()
+    component_id_by_ref: dict[str, int] = {}
+    for component_id, component in enumerate(nx.connected_components(initial_graph)):
+        ref_nodes = [node for node in component if str(node).startswith("ref:")]
+        query_nodes = [node for node in component if str(node).startswith("query:")]
+        if not ref_nodes or not query_nodes:
+            continue
+        for node in ref_nodes:
+            component_id_by_ref[_node_ref_id(node)] = component_id
+        if len(ref_nodes) == 1 and len(query_nodes) == 1:
+            edge_data = initial_graph.edges[ref_nodes[0], query_nodes[0]]
+            if _edge_is_solid(edge_data, min_sequence_identity, max_fraction_gap):
+                trusted_ref_ids.add(_node_ref_id(ref_nodes[0]))
+            else:
+                initial_category_by_ref[_node_ref_id(ref_nodes[0])] = "one2one(weak)"
+        elif len(ref_nodes) == 1:
+            initial_category_by_ref[_node_ref_id(ref_nodes[0])] = "one2many"
+        elif len(query_nodes) == 1:
+            for node in ref_nodes:
+                initial_category_by_ref[_node_ref_id(node)] = "many2one"
+        else:
+            for node in ref_nodes:
+                initial_category_by_ref[_node_ref_id(node)] = "complex/many2many"
+    return initial_category_by_ref, trusted_ref_ids, component_id_by_ref
 
-    # Criterion 1: this specific projection is itself a solid match.
-    applicable += 1
-    if is_solid_match(
-        projection.sequence_identity, projection.fraction_gap, min_sequence_identity, max_fraction_gap
-    ):
-        passed += 1
+
+def _trusted_ref_neighbor_chain(
+    ref_neighbor_index: RefNeighborIndex,
+    trusted_ref_ids: set[str],
+    ref_id: str,
+    side: str,
+    count: int,
+) -> list[str]:
+    # Walk outward along the reference genome from ref_id, skipping any CNEE
+    # that isn't itself a trusted anchor, collecting up to `count` ids.
+    chrom = ref_neighbor_index.chrom_by_uid.get(ref_id)
+    if chrom is None:
+        return []
+    intervals = ref_neighbor_index.intervals_by_chrom[chrom]
+    position = ref_neighbor_index.position_by_uid[ref_id]
+    step = -1 if side == "left" else 1
+    found: list[str] = []
+    index = position + step
+    while 0 <= index < len(intervals) and len(found) < count:
+        candidate_id = intervals[index].cnee_uid
+        if candidate_id in trusted_ref_ids:
+            found.append(candidate_id)
+        index += step
+    return found
+
+
+def _trusted_query_neighbor_chain(
+    trusted_query_index: QueryNeighborIndex,
+    trusted_query_cluster_by_node_id: dict[str, QueryCluster],
+    chrom: str,
+    anchor: int,
+    direction: str,
+    count: int,
+) -> set[str]:
+    # Walk outward along the query genome from anchor, through only the
+    # trusted-only index, re-anchoring on each found cluster's far edge.
+    found: set[str] = set()
+    current = anchor
+    for _ in range(count):
+        node_id, _distance = trusted_query_index.neighbor(chrom, current, direction)
+        if node_id is None:
+            break
+        found.add(node_id)
+        cluster = trusted_query_cluster_by_node_id[node_id]
+        current = cluster.start if direction == "before" else cluster.end
+    return found
+
+
+def _score_projection(
+    projection: Projection,
+    trusted_ref_ids: set[str],
+    ref_neighbor_index: RefNeighborIndex,
+    trusted_query_node_by_ref: dict[str, str],
+    trusted_query_index: QueryNeighborIndex,
+    trusted_query_cluster_by_node_id: dict[str, QueryCluster],
+    max_identity_by_component: dict[int, float],
+    component_id_by_ref: dict[str, int],
+    num_neighbors: int,
+) -> tuple[float, float | None]:
+    """Score a single projection's align_score and neighbor_fraction.
+
+    align_score: this projection's own sequence identity relative to the
+    best-scoring projection anywhere in its connected component (including
+    itself, so the component's best projection always lands at exactly 1.0;
+    a lone one2one(weak) projection is trivially its own component max, so it
+    always scores 1.0 too).
+
+    neighbor_fraction: of the nearest `num_neighbors` trusted reference-CNEE
+    neighbors on EACH flank (so up to 2 * num_neighbors checked total), the
+    fraction whose own trusted query ortholog falls among this projection's
+    own nearest `num_neighbors` trusted query neighbors. None if neither
+    flank has any trusted neighbor at all (no synteny evidence either way).
+    """
+    component_id = component_id_by_ref[projection.ref_id]
+    max_identity = max_identity_by_component.get(component_id, 0.0)
+    if max_identity <= 0:
+        align_score = 1.0
+    else:
+        align_score = (projection.sequence_identity or 0.0) / max_identity
 
     # Reference and query coordinates are both normalized to plus-strand
     # genome coordinates, so the anchor that corresponds to the reference's
@@ -422,109 +491,107 @@ def _verify_projection(
     else:
         anchors = {"left": (projection.query_end, "after"), "right": (projection.query_start, "before")}
 
-    ref_neighbors = {
-        "left": ref_neighbor_index.neighbor(projection.ref_id, "left"),
-        "right": ref_neighbor_index.neighbor(projection.ref_id, "right"),
-    }
-
-    # Criteria 2/3: left/right flank synteny match -- ref-neighbor and
-    # query-neighbor (looked up against the *initial*, pre-pruning cluster
-    # geometry, so this can't be circular) are partners in the initial graph.
+    total_checked = 0
+    total_matched = 0
     for side in ("left", "right"):
-        ref_neighbor_id, _ = ref_neighbors[side]
-        if ref_neighbor_id is None:
+        ref_neighbors = _trusted_ref_neighbor_chain(
+            ref_neighbor_index, trusted_ref_ids, projection.ref_id, side, num_neighbors
+        )
+        if not ref_neighbors:
             continue
         anchor, direction = anchors[side]
-        query_neighbor_node, _ = query_neighbor_index.neighbor(
-            projection.query_chrom, anchor, direction
+        query_neighbor_ids = _trusted_query_neighbor_chain(
+            trusted_query_index,
+            trusted_query_cluster_by_node_id,
+            projection.query_chrom,
+            anchor,
+            direction,
+            num_neighbors,
         )
-        if query_neighbor_node is None:
-            continue
-        applicable += 1
-        if ref_neighbor_id in cluster_refs_by_query_node.get(query_neighbor_node, frozenset()):
-            passed += 1
+        for neighbor_ref_id in ref_neighbors:
+            total_checked += 1
+            neighbor_query_node = trusted_query_node_by_ref.get(neighbor_ref_id)
+            if neighbor_query_node is not None and neighbor_query_node in query_neighbor_ids:
+                total_matched += 1
 
-    # Criterion 4: alignment of the connecting region is solid, required on
-    # EVERY side that has a ref-neighbor at all (AND, not OR) -- extended to
-    # cover the gap between the candidate and the neighbor plus the neighbor
-    # itself, not just the neighbor's own annotation.
-    sides_with_ref_neighbor = [side for side in ("left", "right") if ref_neighbors[side][0] is not None]
-    if sides_with_ref_neighbor:
-        applicable += 1
-        record = chain_records_by_id[projection.chain_id]
-        if projection.chain_id not in block_cache:
-            chain_handle.seek(record.start_byte)
-            chain_text = chain_handle.read(record.byte_length).decode("utf-8")
-            block_cache[projection.chain_id] = BlockIndex.from_blocks(iter_chain_blocks(chain_text))
-        blocks = block_cache[projection.chain_id]
-        ref_chrom = ref_by_uid[projection.ref_id].chrom
-        all_sides_solid = True
-        for side in sides_with_ref_neighbor:
-            ref_neighbor_id, _ = ref_neighbors[side]
-            neighbor_interval = ref_by_uid[ref_neighbor_id]
-            if side == "left":
-                window_start, window_end = neighbor_interval.start, projection.ref_start
-            else:
-                window_start, window_end = projection.ref_end, neighbor_interval.end
-            if not _window_is_solid(
-                ref_chrom,
-                window_start,
-                window_end,
-                record,
-                blocks,
-                sequence_comparator,
-                min_sequence_identity,
-                max_fraction_gap,
-            ):
-                all_sides_solid = False
-                break
-        if all_sides_solid:
-            passed += 1
-
-    # Relaxed to ~half of whatever's applicable (2-of-4 normally, 1-of-3 when
-    # one flank is missing) rather than a strict majority -- the stricter bar
-    # was pruning too many genuine one2many/many2one calls. Floored at 1 so a
-    # fully isolated candidate (no neighbor on either side, applicable == 1)
-    # still has to clear the lone "solid projection" criterion rather than
-    # passing unconditionally.
-    required = max(1, applicable // 2)
-    return passed >= required
+    neighbor_fraction = (total_matched / total_checked) if total_checked else None
+    return align_score, neighbor_fraction
 
 
-def _window_is_solid(
-    ref_chrom: str,
-    window_start: int,
-    window_end: int,
-    record,
-    blocks: BlockIndex,
-    sequence_comparator: SequenceComparator | None,
+def _verify_and_prune_projections(
+    nx,
+    projections: list[Projection],
+    initial_graph,
+    initial_clusters: list[QueryCluster],
+    cnee_bed: str | Path,
     min_sequence_identity: float,
     max_fraction_gap: float,
-) -> bool:
-    # "If there is no alignment somehow, treat that as failed" -- a window
-    # with zero aligned bases (or a degenerate/empty window) never passes.
-    if window_end <= window_start:
-        return False
-    overlapping_blocks = list(blocks.overlapping(window_start, window_end))
-    aligned = _aligned_bases(overlapping_blocks, window_start, window_end)
-    if aligned == 0:
-        return False
-    window_len = window_end - window_start
-    fraction_gap = (window_len - aligned) / window_len
-    sequence_identity = None
-    if sequence_comparator is not None and overlapping_blocks:
-        metrics = sequence_comparator.compare(
-            ref_chrom,
-            window_start,
-            window_end,
-            record.query_chrom,
-            record.query_strand,
-            aligned_segments_for_interval(overlapping_blocks, window_start, window_end, record.query_strand),
+    min_align_score: float,
+    min_neighbor_fraction: float,
+    num_neighbors: int,
+) -> tuple[list[Projection], list[CulledProjection]]:
+    initial_category_by_ref, trusted_ref_ids, component_id_by_ref = _initial_verification_state(
+        nx, initial_graph, min_sequence_identity, max_fraction_gap
+    )
+    if not initial_category_by_ref:
+        return list(projections), []
+
+    # Every trusted ref is, by definition, a solid lone one2one -- exactly
+    # one query cluster, so this lookup is never ambiguous for trusted refs.
+    query_node_by_ref: dict[str, str] = {}
+    for cluster in initial_clusters:
+        for ref_id in cluster.refs:
+            query_node_by_ref.setdefault(ref_id, cluster.node_id)
+    trusted_query_node_by_ref = {
+        ref_id: query_node_by_ref[ref_id] for ref_id in trusted_ref_ids if ref_id in query_node_by_ref
+    }
+    trusted_cluster_ids = set(trusted_query_node_by_ref.values())
+    trusted_query_clusters = [c for c in initial_clusters if c.node_id in trusted_cluster_ids]
+    trusted_query_index = _query_neighbor_index_from_clusters(trusted_query_clusters)
+    trusted_query_cluster_by_node_id = {c.node_id: c for c in trusted_query_clusters}
+
+    ref_neighbor_index = RefNeighborIndex.from_bed(cnee_bed)
+
+    projections_by_component: dict[int, list[Projection]] = defaultdict(list)
+    for projection in projections:
+        component_id = component_id_by_ref.get(projection.ref_id)
+        if component_id is not None:
+            projections_by_component[component_id].append(projection)
+    max_identity_by_component = {
+        component_id: max((p.sequence_identity or 0.0) for p in comp_projections)
+        for component_id, comp_projections in projections_by_component.items()
+    }
+
+    surviving: list[Projection] = []
+    culled: list[CulledProjection] = []
+    for projection in projections:
+        initial_category = initial_category_by_ref.get(projection.ref_id)
+        if initial_category is None:
+            surviving.append(projection)
+            continue
+        align_score, neighbor_fraction = _score_projection(
+            projection,
+            trusted_ref_ids,
+            ref_neighbor_index,
+            trusted_query_node_by_ref,
+            trusted_query_index,
+            trusted_query_cluster_by_node_id,
+            max_identity_by_component,
+            component_id_by_ref,
+            num_neighbors,
         )
-        compared = int(metrics["seq_compared_bases"])
-        if compared > 0:
-            sequence_identity = metrics["seq_matches"] / compared
-    return is_solid_match(sequence_identity, fraction_gap, min_sequence_identity, max_fraction_gap)
+        passes = (
+            align_score > min_align_score
+            and neighbor_fraction is not None
+            and neighbor_fraction > min_neighbor_fraction
+        )
+        if passes:
+            surviving.append(projection)
+        else:
+            culled.append(
+                CulledProjection(projection=projection, initial_orthology_category=initial_category)
+            )
+    return surviving, culled
 
 
 # --------------------------------------------------------------------------
@@ -535,11 +602,11 @@ def _window_is_solid(
 def _assign_orthology_categories(
     components: list[set[str]],
     clusters: list[QueryCluster],
-    graph,
-    min_sequence_identity: float,
-    max_fraction_gap: float,
 ) -> None:
     # Assign query IDs and broad orthology categories from graph components.
+    # A surviving lone ref/query edge is always "one2one" -- if it started
+    # weak, it only got here by passing synteny verification, so there's
+    # nothing left to distinguish it from an edge that was always solid.
     cluster_by_node = {cluster.node_id: cluster for cluster in clusters}
     component_counter = 0
     for component in sorted(
@@ -553,11 +620,7 @@ def _assign_orthology_categories(
         component_counter += 1
         ref_ids = [_node_ref_id(node) for node in ref_nodes]
         if len(ref_nodes) == 1 and len(query_nodes) == 1:
-            edge_data = graph.edges[ref_nodes[0], query_nodes[0]]
-            if _edge_is_solid(edge_data, min_sequence_identity, max_fraction_gap):
-                category = "one2one"
-            else:
-                category = "one2one(weak)"
+            category = "one2one"
             query_ids = [f"q_{_clean_id(ref_ids[0])}"]
         elif len(ref_nodes) == 1 and len(query_nodes) > 1:
             category = "one2many"
@@ -658,6 +721,43 @@ def _write_query_bed(clusters: list[QueryCluster], out_path: str | Path) -> int:
                     ]
                 )
                 + "\n"
+            )
+            count += 1
+    return count
+
+
+def _write_culled_projections_tsv(culled: list[CulledProjection], out_path: str | Path) -> int:
+    # Log every individual projection synteny verification pruned, for
+    # tracking -- these refs end up "uncertain_loss" in out_orthology (unless
+    # a sibling projection of the same ref survived), but this is the only
+    # place the specific culled projection(s) themselves are recorded.
+    count = 0
+    with Path(out_path).open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=CULLED_PROJECTION_COLUMNS,
+            delimiter="\t",
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        for item in sorted(
+            culled,
+            key=lambda c: (c.projection.ref_id, c.projection.query_chrom, c.projection.query_start),
+        ):
+            projection = item.projection
+            writer.writerow(
+                {
+                    "projection_name": projection.projection_name,
+                    "ref_cnee_id": projection.ref_id,
+                    "initial_orthology_category": item.initial_orthology_category,
+                    "query_chrom": projection.query_chrom,
+                    "query_start": projection.query_start,
+                    "query_end": projection.query_end,
+                    "sequence_identity": (
+                        "." if projection.sequence_identity is None else projection.sequence_identity
+                    ),
+                    "gap_fraction": projection.fraction_gap,
+                }
             )
             count += 1
     return count

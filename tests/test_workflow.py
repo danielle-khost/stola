@@ -326,43 +326,40 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.candidate_count, 3)
         self.assertEqual(result.stats_count, 3)
         self.assertEqual(result.strict_stats_count, 1)
-        # CNEE_PARTIAL spans two candidate chains (chrQ, chrQ2), but only the
-        # chrQ2 one is solid (gap 0.0 vs 0.42 on chrQ) and CNEE_PARTIAL has no
-        # ref-neighbor at all (alone on chr1) to corroborate the weak one via
-        # synteny -- so that projection is pruned, leaving a single one2one
-        # query locus rather than a one2many pair.
-        self.assertEqual(result.query_bed_count, 1)
+        # CNEE_PARTIAL spans two candidate chains (chrQ, chrQ2) -- an initial
+        # one2many shape needing verification. It's also alone on chr1, so it
+        # has no reference-CNEE neighbor on either flank at all -- under v2's
+        # neighbor_fraction criterion, no trusted neighbor means no synteny
+        # evidence either way, which fails outright regardless of align_score.
+        # BOTH projections get pruned (not just the weak chrQ one), so this
+        # ref ends up uncertain_loss with zero query CNEE loci, rather than
+        # keeping the solid chrQ2 projection as a lone one2one.
+        self.assertEqual(result.query_bed_count, 0)
         self.assertEqual(result.summary_count, 3)
         self.assertEqual(result.strict_summary_count, 3)
         self.assertEqual(result.orthology_result.orthology_rows, 3)
-        # 3 synteny candidates (one2one control + weak + lost) x 3 default
+        self.assertEqual(result.orthology_result.culled_projection_rows, 2)
+        # 2 synteny candidates (weak + lost; CNEE_PARTIAL no longer has a
+        # one2one control row since it isn't one2one anymore) x 3 default
         # flank sizes (10000, 1000, 100).
-        self.assertEqual(result.synteny_result.rows, 9)
+        self.assertEqual(result.synteny_result.rows, 6)
         self.assertEqual(len(stats_rows), 3)
         self.assertEqual(len(strict_stats_rows), 1)
         self.assertEqual(len(summary_rows), 3)
         self.assertEqual(len(strict_summary_rows), 3)
         self.assertEqual(len(orthology_rows), 3)
-        self.assertEqual(len(synteny_rows), 9)
+        self.assertEqual(len(synteny_rows), 6)
         self.assertEqual(
             list(orthology_rows[0]),
             ["query_cnee_id", "partner_ref_cnees", "orthology_category"],
         )
-        self.assertEqual(
-            bed_lines,
-            [
-                "chrQ2\t770\t890\tq_CNEE_PARTIAL\t0\t-",
-            ],
-        )
-        categories = {
-            row["query_cnee_id"]: row["orthology_category"] for row in orthology_rows
-        }
-        self.assertEqual(categories["q_CNEE_PARTIAL"], "one2one")
+        self.assertEqual(bed_lines, [])
         na_categories = {
             row["partner_ref_cnees"]: row["orthology_category"]
             for row in orthology_rows
             if row["query_cnee_id"] == "NA"
         }
+        self.assertEqual(na_categories["CNEE_PARTIAL"], "uncertain_loss")
         self.assertEqual(na_categories["CNEE_GAPPED"], "lost")
         self.assertEqual(na_categories["CNEE_NO_CHAIN"], "missing")
         summary_statuses = {
@@ -378,7 +375,7 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(strict_summary_by_id["CNEE_PARTIAL"]["projection_status"], "aligned")
         synteny_statuses = {row["orthology_status"] for row in synteny_rows}
-        self.assertEqual(synteny_statuses, {"one2one", "weak", "lost"})
+        self.assertEqual(synteny_statuses, {"weak", "lost"})
         self.assertEqual(
             {int(row["flank_size"]) for row in synteny_rows}, {10000, 1000, 100}
         )
@@ -540,7 +537,10 @@ class WorkflowTests(unittest.TestCase):
         }
         self.assertEqual(categories_by_query["q_CNEE_SOLID"], "one2one")
         self.assertEqual(categories_by_query["q_CNEE_SEQ_MISSING"], "one2one")
-        self.assertEqual(categories_by_query["q_CNEE_NONSOLID"], "one2one(weak)")
+        # A lone ref/query edge is always reported as "one2one" now, even if
+        # non-solid -- the one2one(weak) label only ever applied to the raw,
+        # pre-verification graph shape (see out_culled_projections).
+        self.assertEqual(categories_by_query["q_CNEE_NONSOLID"], "one2one")
         na_categories = {
             row["partner_ref_cnees"]: row["orthology_category"]
             for row in rows
@@ -549,7 +549,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(na_categories["CNEE_GAP_ONLY"], "lost")
         self.assertEqual(na_categories["CNEE_MISSING"], "missing")
 
-    def test_orthology_falls_back_to_one2one_weak_when_no_single_projection_is_solid(
+    def test_orthology_keeps_lone_edge_as_one2one_when_no_single_projection_is_solid(
         self,
     ) -> None:
         if not _has_networkx():
@@ -606,13 +606,152 @@ class WorkflowTests(unittest.TestCase):
         # Blending would give (max identity 0.9, min gap 0.05), which passes
         # both thresholds. Neither projection alone does, so the edge isn't
         # solid -- but it's still the only ref/query pair here, so it's kept
-        # as a weak one2one call rather than dropped to uncertain_loss.
+        # as a one2one call (the weak/solid distinction only matters for the
+        # raw pre-verification category, not final output) rather than
+        # dropped to uncertain_loss.
         self.assertEqual(result.query_bed_rows, 1)
         self.assertEqual(result.orthology_rows, 1)
         categories_by_query = {
             row["query_cnee_id"]: row["orthology_category"] for row in rows
         }
-        self.assertEqual(categories_by_query["q_CNEE_A"], "one2one(weak)")
+        self.assertEqual(categories_by_query["q_CNEE_A"], "one2one")
+
+    def test_synteny_verification_v2_promotes_syntenic_weak_call_and_culls_mismatched_one(
+        self,
+    ) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from toga4cnee.orthology import classify_orthology
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bed = tmp_path / "cnees.bed"
+            stats = tmp_path / "stats.tsv"
+            orthology = tmp_path / "orthology.tsv"
+            query_bed = tmp_path / "query.bed"
+            culled = tmp_path / "culled.tsv"
+            # A/B/D/E/F/G are solid one2one anchors, colinear on both genomes.
+            # CAND_PASS is weak but sits exactly where a syntenic candidate
+            # should (between B and D on both ref and query) -- it should
+            # survive verification and merge into plain "one2one" output.
+            # CAND_FAIL is also weak, bracketed by trusted anchors F/G, but
+            # its own query projection sits nowhere near F or G's query loci
+            # (a rearranged/spurious hit) -- it should get culled.
+            bed.write_text(
+                "\n".join(
+                    [
+                        "chr1\t0\t50\tA",
+                        "chr1\t100\t150\tB",
+                        "chr1\t200\t250\tCAND_PASS",
+                        "chr1\t300\t350\tD",
+                        "chr1\t400\t450\tE",
+                        "chr1\t500\t550\tF",
+                        "chr1\t600\t650\tCAND_FAIL",
+                        "chr1\t700\t750\tG",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            columns = [
+                "cnee_uid",
+                "ref_start",
+                "ref_end",
+                "chain_id",
+                "aligned_bases",
+                "query_chrom",
+                "query_strand",
+                "query_aligned_start",
+                "query_aligned_end",
+                "query_projection_name",
+                "gap_fraction_within_chain_span",
+                "seq_identity",
+            ]
+            rows = [
+                ("A", 0, 50, 1000, 1050, "A#1", 0.05, 0.9),
+                ("B", 100, 150, 1100, 1150, "B#1", 0.05, 0.9),
+                ("CAND_PASS", 200, 250, 1200, 1250, "CANDP#1", 0.5, 0.9),
+                ("D", 300, 350, 1300, 1350, "D#1", 0.05, 0.9),
+                ("E", 400, 450, 1400, 1450, "E#1", 0.05, 0.9),
+                ("F", 500, 550, 1500, 1550, "F#1", 0.05, 0.9),
+                # Rearranged: lands far from F/G's query neighborhood instead
+                # of between them.
+                ("CAND_FAIL", 600, 650, 50, 100, "CANDF#1", 0.5, 0.9),
+                ("G", 700, 750, 1700, 1750, "G#1", 0.05, 0.9),
+            ]
+            stats.write_text(
+                "\t".join(columns)
+                + "\n"
+                + "\n".join(
+                    "\t".join(
+                        [
+                            ref_id,
+                            str(ref_start),
+                            str(ref_end),
+                            "1",
+                            "50",
+                            "chrQ",
+                            "+",
+                            str(q_start),
+                            str(q_end),
+                            proj_name,
+                            str(gap),
+                            str(identity),
+                        ]
+                    )
+                    for ref_id, ref_start, ref_end, q_start, q_end, proj_name, gap, identity in rows
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = classify_orthology(
+                stats,
+                bed,
+                tmp_path / "unused_index.json",
+                orthology,
+                query_bed,
+                min_sequence_identity=0.7,
+                max_fraction_gap=0.1,
+                synteny_check=True,
+                verification_num_neighbors=1,
+                out_culled_projections=culled,
+            )
+            orthology_rows = _read_tsv(orthology)
+            culled_rows = _read_tsv(culled)
+
+        categories_by_query = {
+            row["query_cnee_id"]: row["orthology_category"] for row in orthology_rows
+        }
+        # CAND_PASS survived and is reported as plain "one2one", not
+        # "one2one(weak)".
+        self.assertEqual(categories_by_query["q_CAND_PASS"], "one2one")
+        for ref_id in ("A", "B", "D", "E", "F", "G"):
+            self.assertEqual(categories_by_query[f"q_{ref_id}"], "one2one")
+
+        na_categories = {
+            row["partner_ref_cnees"]: row["orthology_category"]
+            for row in orthology_rows
+            if row["query_cnee_id"] == "NA"
+        }
+        self.assertEqual(na_categories["CAND_FAIL"], "uncertain_loss")
+        self.assertEqual(result.query_bed_rows, 7)
+        self.assertEqual(result.culled_projection_rows, 1)
+
+        self.assertEqual(len(culled_rows), 1)
+        self.assertEqual(
+            culled_rows[0],
+            {
+                "projection_name": "CANDF#1",
+                "ref_cnee_id": "CAND_FAIL",
+                "initial_orthology_category": "one2one(weak)",
+                "query_chrom": "chrQ",
+                "query_start": "50",
+                "query_end": "100",
+                "sequence_identity": "0.9",
+                "gap_fraction": "0.5",
+            },
+        )
 
     def test_orthology_clustering_keeps_opposite_strand_overlaps_separate(self) -> None:
         if not _has_networkx():
