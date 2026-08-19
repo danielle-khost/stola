@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .orthology import (
     DEFAULT_MIN_ALIGN_SCORE,
+    DEFAULT_MIN_GAP_LENGTH,
     DEFAULT_MIN_NEIGHBOR_FRACTION,
     DEFAULT_VERIFICATION_NUM_NEIGHBORS,
 )
@@ -41,6 +42,7 @@ def _run(args: argparse.Namespace) -> None:
         out_synteny=args.out_synteny,
         out_synteny_neighbors=args.out_synteny_neighbors,
         out_culled_projections=args.out_culled_projections,
+        out_ref_cnees=args.out_ref_cnees,
         ref_fasta=args.ref_fasta,
         query_fasta=args.query_fasta,
         synteny_flank_sizes=args.synteny_flank_sizes,
@@ -51,6 +53,7 @@ def _run(args: argparse.Namespace) -> None:
         min_align_score=args.min_align_score,
         min_neighbor_fraction=args.min_neighbor_fraction,
         verification_num_neighbors=args.verification_num_neighbors,
+        min_gap_length=args.min_gap_length,
         work_dir=args.work_dir,
     )
     print(f"Indexed {result.chain_count} chains")
@@ -80,6 +83,10 @@ def _run(args: argparse.Namespace) -> None:
     print(
         f"Wrote {result.orthology_result.culled_projection_rows} culled-projection rows -> "
         f"{result.culled_projections_path}"
+    )
+    print(
+        f"Wrote {result.orthology_result.ref_cnee_rows} ref CNEE summary rows -> "
+        f"{result.ref_cnees_path}"
     )
     if args.work_dir is not None:
         print(f"Kept intermediates in {args.work_dir}")
@@ -191,6 +198,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_parser.add_argument(
+        "--out-ref-cnees",
+        type=Path,
+        default=None,
+        help=(
+            "One row per reference CNEE, with pruning counts and pre/post-pruning "
+            "category (see output_files.md) TSV [default: OUT_STATS with .ref_cnees "
+            "before extension]"
+        ),
+    )
+    run_parser.add_argument(
         "--synteny-flank-sizes",
         type=int,
         nargs="+",
@@ -259,6 +276,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Number of trusted (solid one2one) reference-CNEE neighbors checked "
             f"per flank during synteny verification [default: {DEFAULT_VERIFICATION_NUM_NEIGHBORS}]"
+        ),
+    )
+    run_parser.add_argument(
+        "--min-gap-length",
+        type=int,
+        default=DEFAULT_MIN_GAP_LENGTH,
+        help=(
+            "Minimum N-run length in the query FASTA considered a candidate "
+            "deliberate assembly-gap marker, when inferring contig boundaries "
+            f"for lost-ref sub-categorization [default: {DEFAULT_MIN_GAP_LENGTH}]"
         ),
     )
     run_parser.add_argument(

@@ -79,7 +79,7 @@ CATEGORY_COLORS = {
     "complex/many2many": "#9E9E9E",
     "uncertain_loss": "#FFC107",
     "lost": "#F44336",
-    "missing": "#F5F5F5",
+    "unaligned": "#F5F5F5",
 }
 CATEGORY_LABELS = {
     "one2one": "one2one",
@@ -89,7 +89,7 @@ CATEGORY_LABELS = {
     "complex/many2many": "complex",
     "uncertain_loss": "uncertain loss",
     "lost": "lost",
-    "missing": "missing",
+    "unaligned": "unaligned",
 }
 CATEGORY_ORDER = [
     "one2one",
@@ -99,7 +99,7 @@ CATEGORY_ORDER = [
     "complex/many2many",
     "uncertain_loss",
     "lost",
-    "missing",
+    "unaligned",
 ]
 
 
@@ -112,13 +112,13 @@ CATEGORY_ORDER = [
 class NodeBox:
     label: str
     category: str
-    strong: bool | None  # None only for "missing" / "lost", where it's moot
+    strong: bool | None  # None only for "unaligned" / "lost", where it's moot
     sublabel: str = ""
 
     @property
     def shape(self) -> str:
-        if self.category == "missing":
-            return "missing"
+        if self.category == "unaligned":
+            return "unaligned"
         if self.category == "lost":
             return "rect"
         return "rect" if self.strong else "ellipse"
@@ -351,7 +351,7 @@ def _ref_node_box(
     max_fraction_gap: float,
 ) -> NodeBox:
     interval = ref_by_uid[ref_uid]
-    category = category_by_ref_uid.get(ref_uid, "missing")
+    category = category_by_ref_uid.get(ref_uid, "unaligned")
     strong: bool | None = None
     if category in ALIGNED_CATEGORIES:
         strong = any(
@@ -386,7 +386,7 @@ def _query_node_box(
     max_fraction_gap: float,
 ) -> NodeBox:
     record = query_by_id[query_id]
-    category = category_by_query_id.get(query_id, "missing")
+    category = category_by_query_id.get(query_id, "unaligned")
     strong = _query_node_is_strong(
         query_id, query_by_id, query_to_refs, stats_by_ref, min_sequence_identity, max_fraction_gap
     )
@@ -681,7 +681,7 @@ def _draw_box(ax, x: float, y: float, box: NodeBox | None) -> None:
         patch = Ellipse(
             (x, y), BOX_W, BOX_H, facecolor=color, edgecolor="black", linewidth=1.2, zorder=2
         )
-    elif shape == "missing":
+    elif shape == "unaligned":
         patch = Rectangle(
             (x - BOX_W / 2, y - BOX_H / 2),
             BOX_W,
@@ -704,7 +704,7 @@ def _draw_box(ax, x: float, y: float, box: NodeBox | None) -> None:
             zorder=2,
         )
     ax.add_patch(patch)
-    text_color = "black" if box.category in {"uncertain_loss", "missing"} else "white"
+    text_color = "black" if box.category in {"uncertain_loss", "unaligned"} else "white"
     label_fontsize = _fit_fontsize(
         box.label, 9, base_chars=int(CHARS_PER_UNIT_LABEL * BOX_W * width_factor), min_fontsize=5.0
     )
@@ -781,7 +781,7 @@ def _draw_legend(ax, y_top: float, x_left: float, x_right: float) -> float:
     for category in CATEGORY_ORDER:
         color = CATEGORY_COLORS[category]
         style = {"facecolor": color, "edgecolor": "black", "linewidth": 1.0}
-        if category == "missing":
+        if category == "unaligned":
             style.update(edgecolor="#666666", linestyle="--", hatch="//")
         ax.add_patch(Rectangle((x0, y - swatch_h / 2), swatch_w, swatch_h, **style))
         ax.text(x0 + swatch_w + 0.15, y, CATEGORY_LABELS[category], va="center", fontsize=8)
@@ -983,7 +983,7 @@ def build_jobs(
 
     jobs: "OrderedDict[frozenset, tuple[str, set[str], set[str]]]" = OrderedDict()
     for ref_uid in requested_ref_uids:
-        category = category_by_ref_uid.get(ref_uid, "missing")
+        category = category_by_ref_uid.get(ref_uid, "unaligned")
         if category in skip_categories:
             print(
                 f"skipping {ref_uid}: category '{category}' is excluded "
@@ -1244,7 +1244,7 @@ def main(argv: list[str] | None = None) -> None:
                         ],
                     )
                 )
-        elif category == "missing":
+        elif category == "unaligned":
             query_note = "missing: no candidate chain overlaps this CNEE at all"
         else:
             (ref_uid,) = component_refs

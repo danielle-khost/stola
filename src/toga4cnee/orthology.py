@@ -8,10 +8,13 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .assembly_gaps import DEFAULT_MIN_GAP_LENGTH, NRunIndex, scan_query_assembly_gaps
 from .bed import parse_bed
+from .chain import iter_chain_blocks
+from .index import load_index
 from .sequence_compare import SequenceComparator
 from .summary import is_solid_match
-from .synteny import QueryBedRecord, QueryNeighborIndex, RefNeighborIndex
+from .synteny import BlockIndex, QueryBedRecord, QueryNeighborIndex, RefNeighborIndex, _flanking_blocks
 
 ORTHOLOGY_COLUMNS = [
     "query_cnee_id",
@@ -30,11 +33,25 @@ CULLED_PROJECTION_COLUMNS = [
     "gap_fraction",
 ]
 
+REF_CNEE_COLUMNS = [
+    "ref_cnee_id",
+    "orthology_category",
+    "num_projections_final",
+    "num_projections_pruned",
+    "pre_pruning_category",
+]
+
 # Verification criteria v2 (see synteny_verification.md): retain a projection
 # only if it clears BOTH an align_score and a neighbor-ortholog-fraction bar.
 DEFAULT_MIN_ALIGN_SCORE = 0.5
 DEFAULT_MIN_NEIGHBOR_FRACTION = 0.5
 DEFAULT_VERIFICATION_NUM_NEIGHBORS = 5
+
+# Fallback ref category for a "lost" ref (chain overlap, zero aligned bases)
+# when the query assembly's gap-marker convention can't be confidently
+# inferred (or no query FASTA was supplied at all) -- see
+# orthology_classification.md and assembly_gaps.py.
+UNCERTAIN_LOSS_TYPE_CATEGORY = "missing/loss"
 
 
 @dataclass(frozen=True)
@@ -53,9 +70,23 @@ class Projection:
 
 
 @dataclass(frozen=True)
+class LostGapCandidate:
+    # A ref's best-ranked candidate chain among its zero-aligned-bases rows --
+    # the chain whose gap gets examined for the probable_loss/assembly_gap_loss
+    # distinction. Not yet known to be "lost" overall (this ref might still
+    # have a *different* candidate chain with real aligned bases).
+    ref_id: str
+    ref_chrom: str
+    ref_start: int
+    ref_end: int
+    chain_id: str
+
+
+@dataclass(frozen=True)
 class ProjectionEvidence:
     projections: list[Projection]
     refs_with_candidates: set[str]
+    zero_aligned_best_row_by_ref: dict[str, LostGapCandidate]
 
 
 @dataclass(frozen=True)
@@ -105,6 +136,7 @@ class OrthologyResult:
     orthology_rows: int
     query_bed_rows: int
     culled_projection_rows: int
+    ref_cnee_rows: int
 
 
 def classify_orthology(
@@ -121,6 +153,9 @@ def classify_orthology(
     min_neighbor_fraction: float = DEFAULT_MIN_NEIGHBOR_FRACTION,
     verification_num_neighbors: int = DEFAULT_VERIFICATION_NUM_NEIGHBORS,
     out_culled_projections: str | Path | None = None,
+    query_fasta: str | Path | None = None,
+    min_gap_length: int = DEFAULT_MIN_GAP_LENGTH,
+    out_ref_cnees: str | Path | None = None,
 ) -> OrthologyResult:
     """Classify query CNEE loci from overlap stats and write TSV/BED outputs.
 
@@ -129,8 +164,7 @@ def classify_orthology(
     categories -- a non-solid single ref/query edge (putative one2one(weak)),
     or any edge inside a one2many/many2one/complex component. "lost" refs
     (zero aligned query bases) are never part of this graph at all, so they
-    are never subject to verification -- that category needs different
-    criteria entirely and is deliberately left alone for now.
+    are never subject to verification.
 
     A projection survives verification only if BOTH:
       - align_score (its own sequence identity relative to the best-scoring
@@ -156,6 +190,18 @@ def classify_orthology(
     as one that was always solid, so the one2one(weak) label is dropped from
     final output entirely (it still shows up as an *initial*, pre-pruning
     category in out_culled_projections).
+
+    Independently of verification, when query_fasta is given, every "lost"
+    ref (zero aligned query bases anywhere) is further split into
+    probable_loss or assembly_gap_loss by checking whether its chain gap's
+    query-side span coincides with an inferred contig-boundary N-run in the
+    query assembly (see assembly_gaps.py). When query_fasta is omitted, or
+    the query assembly's gap-length convention can't be confidently
+    inferred, or a given ref's own chain gap is itself ambiguous, this falls
+    back to the collapsed "missing/loss" category instead of guessing. This
+    sub-categorization, plus per-ref pruning counts, is written to
+    out_ref_cnees if given (see output_files.md) -- out_orthology's own
+    "lost"/"unaligned" labels are unaffected either way.
     """
     if min_sequence_identity < 0 or min_sequence_identity > 1:
         raise ValueError("min_sequence_identity must be between 0 and 1")
@@ -178,8 +224,9 @@ def classify_orthology(
     initial_graph = _build_orthology_graph(nx, ref_ids, initial_clusters)
 
     culled: list[CulledProjection] = []
+    initial_category_by_ref: dict[str, str] = {}
     if synteny_check:
-        surviving, culled = _verify_and_prune_projections(
+        surviving, culled, initial_category_by_ref = _verify_and_prune_projections(
             nx,
             evidence.projections,
             initial_graph,
@@ -209,10 +256,36 @@ def classify_orthology(
     bed_count = _write_query_bed(final_clusters, out_query_bed)
     if out_culled_projections is not None:
         _write_culled_projections_tsv(culled, out_culled_projections)
+
+    ref_cnee_count = 0
+    if out_ref_cnees is not None:
+        lost_gap_candidates = {
+            ref_id: candidate
+            for ref_id, candidate in evidence.zero_aligned_best_row_by_ref.items()
+            if ref_id not in refs_with_any_projection
+        }
+        n_run_index: NRunIndex | None = None
+        if query_fasta is not None and lost_gap_candidates:
+            gap_convention, candidate_index = scan_query_assembly_gaps(query_fasta, min_gap_length)
+            if gap_convention.confidence != "none":
+                n_run_index = candidate_index
+        lost_category_by_ref = _classify_lost_refs(lost_gap_candidates, index_path, n_run_index)
+        ref_cnee_count = _write_ref_cnee_tsv(
+            ref_ids,
+            final_clusters,
+            initial_category_by_ref,
+            culled,
+            evidence.refs_with_candidates,
+            refs_with_any_projection,
+            lost_category_by_ref,
+            out_ref_cnees,
+        )
+
     return OrthologyResult(
         orthology_rows=orthology_count,
         query_bed_rows=bed_count,
         culled_projection_rows=len(culled),
+        ref_cnee_rows=ref_cnee_count,
     )
 
 
@@ -220,10 +293,12 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
     # Read candidate evidence and aligned query coordinates usable as graph edges.
     projections: list[Projection] = []
     refs_with_candidates: set[str] = set()
+    zero_aligned_best_row_by_ref: dict[str, LostGapCandidate] = {}
     with Path(stats_path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         required = {
             "cnee_uid",
+            "ref_chrom",
             "ref_start",
             "ref_end",
             "chain_id",
@@ -235,6 +310,7 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
             "query_projection_name",
             "gap_fraction_within_chain_span",
             "seq_identity",
+            "rank_by_chain_score",
         }
         missing = sorted(required.difference(reader.fieldnames or []))
         if missing:
@@ -242,6 +318,18 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
         for row in reader:
             refs_with_candidates.add(row["cnee_uid"])
             if int(row["aligned_bases"]) <= 0:
+                # Track the best-ranked zero-aligned candidate chain per ref --
+                # only meaningful for refs that turn out to have NO aligned
+                # projection at all anywhere (filtered against
+                # refs_with_any_projection by the caller).
+                if int(row["rank_by_chain_score"]) == 1:
+                    zero_aligned_best_row_by_ref[row["cnee_uid"]] = LostGapCandidate(
+                        ref_id=row["cnee_uid"],
+                        ref_chrom=row["ref_chrom"],
+                        ref_start=int(row["ref_start"]),
+                        ref_end=int(row["ref_end"]),
+                        chain_id=row["chain_id"],
+                    )
                 continue
             if row["query_aligned_start"] == "." or row["query_aligned_end"] == ".":
                 continue
@@ -263,6 +351,7 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
     return ProjectionEvidence(
         projections=projections,
         refs_with_candidates=refs_with_candidates,
+        zero_aligned_best_row_by_ref=zero_aligned_best_row_by_ref,
     )
 
 
@@ -529,12 +618,12 @@ def _verify_and_prune_projections(
     min_align_score: float,
     min_neighbor_fraction: float,
     num_neighbors: int,
-) -> tuple[list[Projection], list[CulledProjection]]:
+) -> tuple[list[Projection], list[CulledProjection], dict[str, str]]:
     initial_category_by_ref, trusted_ref_ids, component_id_by_ref = _initial_verification_state(
         nx, initial_graph, min_sequence_identity, max_fraction_gap
     )
     if not initial_category_by_ref:
-        return list(projections), []
+        return list(projections), [], initial_category_by_ref
 
     # Every trusted ref is, by definition, a solid lone one2one -- exactly
     # one query cluster, so this lookup is never ambiguous for trusted refs.
@@ -591,7 +680,71 @@ def _verify_and_prune_projections(
             culled.append(
                 CulledProjection(projection=projection, initial_orthology_category=initial_category)
             )
-    return surviving, culled
+    return surviving, culled, initial_category_by_ref
+
+
+# --------------------------------------------------------------------------
+# "Lost" ref sub-categorization: a ref whose CNEE sits entirely inside a
+# chain gap (zero aligned query bases) is split into probable_loss (the gap
+# isn't a query assembly artifact) vs assembly_gap_loss (it is), using the
+# query genome's inferred contig-boundary N-runs. Independent of synteny
+# verification -- this always runs (when a query FASTA is available),
+# regardless of synteny_check.
+# --------------------------------------------------------------------------
+
+
+def _classify_lost_refs(
+    lost_gap_candidates: dict[str, LostGapCandidate],
+    index_path: str | Path,
+    n_run_index: NRunIndex | None,
+) -> dict[str, str]:
+    """Categorize each "lost" ref as probable_loss / assembly_gap_loss.
+
+    Falls back to UNCERTAIN_LOSS_TYPE_CATEGORY ("missing/loss") whenever the
+    distinction can't be made confidently: n_run_index is None (no query
+    FASTA was supplied, or its gap-length convention couldn't be inferred
+    confidently), or this particular ref's own chain gap is itself ambiguous
+    (no aligned block on one side at all, i.e. it sits at the very edge of
+    its chain's aligned span).
+    """
+    if not lost_gap_candidates:
+        return {}
+
+    category_by_ref: dict[str, str] = {}
+    if n_run_index is None:
+        return {ref_id: UNCERTAIN_LOSS_TYPE_CATEGORY for ref_id in lost_gap_candidates}
+
+    payload, records = load_index(index_path)
+    record_by_chain_id = {record.chain_id: record for record in records}
+    chain_path = payload["indexed_chain_path"]
+    block_cache: dict[str, BlockIndex] = {}
+
+    with Path(chain_path).open("rb") as chain_handle:
+        for ref_id, candidate in lost_gap_candidates.items():
+            record = record_by_chain_id[candidate.chain_id]
+            if candidate.chain_id not in block_cache:
+                chain_handle.seek(record.start_byte)
+                chain_text = chain_handle.read(record.byte_length).decode("utf-8")
+                block_cache[candidate.chain_id] = BlockIndex.from_blocks(iter_chain_blocks(chain_text))
+            blocks = block_cache[candidate.chain_id]
+
+            preceding, following = _flanking_blocks(blocks, candidate.ref_start, candidate.ref_end)
+            if preceding is None or following is None:
+                category_by_ref[ref_id] = UNCERTAIN_LOSS_TYPE_CATEGORY
+                continue
+
+            if record.query_strand == "+":
+                query_gap_start, query_gap_end = preceding.query_end, following.query_start
+            else:
+                query_gap_start, query_gap_end = following.query_end, preceding.query_start
+
+            if query_gap_end > query_gap_start and n_run_index.overlaps(
+                record.query_chrom, query_gap_start, query_gap_end
+            ):
+                category_by_ref[ref_id] = "assembly_gap_loss"
+            else:
+                category_by_ref[ref_id] = "probable_loss"
+    return category_by_ref
 
 
 # --------------------------------------------------------------------------
@@ -653,7 +806,7 @@ def _write_orthology_tsv(
     refs_with_any_projection: set[str],
     out_path: str | Path,
 ) -> int:
-    # Write compact query/ref/category rows, including lost/missing/
+    # Write compact query/ref/category rows, including lost/unaligned/
     # uncertain_loss references. Since clusters here are already the final
     # (post-verification) result, a cluster's own .refs set IS the correct
     # partner list -- no separate filtered-graph lookup needed.
@@ -686,7 +839,7 @@ def _write_orthology_tsv(
             if ref_id in refs_with_final_query_edge:
                 continue
             if ref_id not in refs_with_candidates:
-                category = "missing"
+                category = "unaligned"
             elif ref_id not in refs_with_any_projection:
                 category = "lost"
             else:
@@ -757,6 +910,72 @@ def _write_culled_projections_tsv(culled: list[CulledProjection], out_path: str 
                         "." if projection.sequence_identity is None else projection.sequence_identity
                     ),
                     "gap_fraction": projection.fraction_gap,
+                }
+            )
+            count += 1
+    return count
+
+
+def _write_ref_cnee_tsv(
+    ref_ids: list[str],
+    final_clusters: list[QueryCluster],
+    initial_category_by_ref: dict[str, str],
+    culled: list[CulledProjection],
+    refs_with_candidates: set[str],
+    refs_with_any_projection: set[str],
+    lost_category_by_ref: dict[str, str],
+    out_path: str | Path,
+) -> int:
+    """Write one row per reference CNEE (see output_files.md).
+
+    orthology_category is the ref-based final category: one2one/one2many/
+    many2one/complex/many2many for a ref with a surviving query edge,
+    otherwise unaligned/probable_loss/assembly_gap_loss/"missing/loss"/
+    uncertain_loss. pre_pruning_category is the same value for anything
+    verification never touches (unaligned, the loss subtypes); for anything
+    that went through verification it's the raw pre-pruning graph shape,
+    which can differ from the final category (e.g. an initial
+    complex/many2many that pruned down to a lone one2one edge).
+    """
+    final_category_by_ref: dict[str, str] = {}
+    final_count_by_ref: dict[str, int] = defaultdict(int)
+    for cluster in final_clusters:
+        if not cluster.query_cnee_id:
+            continue
+        for ref_id in cluster.refs:
+            final_category_by_ref[ref_id] = cluster.orthology_category
+            final_count_by_ref[ref_id] += 1
+
+    pruned_count_by_ref: dict[str, int] = defaultdict(int)
+    for item in culled:
+        pruned_count_by_ref[item.projection.ref_id] += 1
+
+    count = 0
+    with Path(out_path).open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=REF_CNEE_COLUMNS, delimiter="\t", lineterminator="\n"
+        )
+        writer.writeheader()
+        for ref_id in ref_ids:
+            if ref_id in final_category_by_ref:
+                category = final_category_by_ref[ref_id]
+                pre_pruning_category = initial_category_by_ref.get(ref_id, category)
+            elif ref_id not in refs_with_candidates:
+                category = "unaligned"
+                pre_pruning_category = "unaligned"
+            elif ref_id not in refs_with_any_projection:
+                category = lost_category_by_ref.get(ref_id, UNCERTAIN_LOSS_TYPE_CATEGORY)
+                pre_pruning_category = category
+            else:
+                category = "uncertain_loss"
+                pre_pruning_category = initial_category_by_ref.get(ref_id, "uncertain_loss")
+            writer.writerow(
+                {
+                    "ref_cnee_id": ref_id,
+                    "orthology_category": category,
+                    "num_projections_final": final_count_by_ref.get(ref_id, 0),
+                    "num_projections_pruned": pruned_count_by_ref.get(ref_id, 0),
+                    "pre_pruning_category": pre_pruning_category,
                 }
             )
             count += 1
