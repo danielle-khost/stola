@@ -10,7 +10,14 @@ from typing import Sequence
 
 from .candidates import write_candidates
 from .index import build_index
-from .orthology import OrthologyResult, classify_orthology
+from .orthology import (
+    DEFAULT_MIN_ALIGN_SCORE,
+    DEFAULT_MIN_GAP_LENGTH,
+    DEFAULT_MIN_NEIGHBOR_FRACTION,
+    DEFAULT_VERIFICATION_NUM_NEIGHBORS,
+    OrthologyResult,
+    classify_orthology,
+)
 from .overlap import OVERLAP_COLUMNS, write_overlap_stats
 from .sequence_compare import SequenceComparator
 from .synteny import (
@@ -40,6 +47,8 @@ class WorkflowResult:
     synteny_neighbors_path: Path
     strict_stats_path: Path
     strict_summary_path: Path
+    culled_projections_path: Path
+    ref_cnees_path: Path
 
 
 def run_workflow(
@@ -53,6 +62,8 @@ def run_workflow(
     out_strict_summary: str | Path | None = None,
     out_synteny: str | Path | None = None,
     out_synteny_neighbors: str | Path | None = None,
+    out_culled_projections: str | Path | None = None,
+    out_ref_cnees: str | Path | None = None,
     ref_fasta: str | Path | None = None,
     query_fasta: str | Path | None = None,
     synteny_flank_sizes: Sequence[int] = DEFAULT_FLANK_SIZES,
@@ -60,6 +71,10 @@ def run_workflow(
     min_sequence_identity: float = 0.7,
     max_fraction_gap: float = 0.1,
     synteny_check: bool = True,
+    min_align_score: float = DEFAULT_MIN_ALIGN_SCORE,
+    min_neighbor_fraction: float = DEFAULT_MIN_NEIGHBOR_FRACTION,
+    verification_num_neighbors: int = DEFAULT_VERIFICATION_NUM_NEIGHBORS,
+    min_gap_length: int = DEFAULT_MIN_GAP_LENGTH,
     work_dir: str | Path | None = None,
 ) -> WorkflowResult:
     """Run indexing, candidate discovery, overlap stats, and query BED export."""
@@ -101,6 +116,16 @@ def run_workflow(
         if out_synteny_neighbors is not None
         else _add_suffix_before_extension(out_stats, ".synteny_neighbors")
     )
+    out_culled_projections_path = (
+        Path(out_culled_projections)
+        if out_culled_projections is not None
+        else _add_suffix_before_extension(out_stats, ".culled_projections")
+    )
+    out_ref_cnees_path = (
+        Path(out_ref_cnees)
+        if out_ref_cnees is not None
+        else _add_suffix_before_extension(out_stats, ".ref_cnees")
+    )
     out_bed.parent.mkdir(parents=True, exist_ok=True)
     out_stats.parent.mkdir(parents=True, exist_ok=True)
     out_summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +134,8 @@ def run_workflow(
     out_strict_summary_path.parent.mkdir(parents=True, exist_ok=True)
     out_synteny_path.parent.mkdir(parents=True, exist_ok=True)
     out_synteny_neighbors_path.parent.mkdir(parents=True, exist_ok=True)
+    out_culled_projections_path.parent.mkdir(parents=True, exist_ok=True)
+    out_ref_cnees_path.parent.mkdir(parents=True, exist_ok=True)
 
     if work_dir is None:
         with tempfile.TemporaryDirectory(prefix="toga4cnee_") as tmpdir:
@@ -123,6 +150,8 @@ def run_workflow(
                 out_strict_summary_path,
                 out_synteny_path,
                 out_synteny_neighbors_path,
+                out_culled_projections_path,
+                out_ref_cnees_path,
                 ref_fasta,
                 query_fasta,
                 synteny_flank_sizes,
@@ -130,6 +159,10 @@ def run_workflow(
                 min_sequence_identity,
                 max_fraction_gap,
                 synteny_check,
+                min_align_score,
+                min_neighbor_fraction,
+                verification_num_neighbors,
+                min_gap_length,
                 Path(tmpdir),
             )
 
@@ -146,6 +179,8 @@ def run_workflow(
         out_strict_summary_path,
         out_synteny_path,
         out_synteny_neighbors_path,
+        out_culled_projections_path,
+        out_ref_cnees_path,
         ref_fasta,
         query_fasta,
         synteny_flank_sizes,
@@ -153,6 +188,10 @@ def run_workflow(
         min_sequence_identity,
         max_fraction_gap,
         synteny_check,
+        min_align_score,
+        min_neighbor_fraction,
+        verification_num_neighbors,
+        min_gap_length,
         work_path,
     )
 
@@ -168,6 +207,8 @@ def _run_workflow_in_dir(
     out_strict_summary: Path,
     out_synteny: Path,
     out_synteny_neighbors: Path,
+    out_culled_projections: Path,
+    out_ref_cnees: Path,
     ref_fasta: str | Path | None,
     query_fasta: str | Path | None,
     synteny_flank_sizes: Sequence[int],
@@ -175,6 +216,10 @@ def _run_workflow_in_dir(
     min_sequence_identity: float,
     max_fraction_gap: float,
     synteny_check: bool,
+    min_align_score: float,
+    min_neighbor_fraction: float,
+    verification_num_neighbors: int,
+    min_gap_length: int,
     work_dir: Path,
 ) -> WorkflowResult:
     # Execute the full workflow in order, keeping intermediates under work_dir.
@@ -205,6 +250,13 @@ def _run_workflow_in_dir(
             max_fraction_gap=max_fraction_gap,
             synteny_check=synteny_check,
             sequence_comparator=sequence_comparator,
+            min_align_score=min_align_score,
+            min_neighbor_fraction=min_neighbor_fraction,
+            verification_num_neighbors=verification_num_neighbors,
+            out_culled_projections=out_culled_projections,
+            query_fasta=query_fasta,
+            min_gap_length=min_gap_length,
+            out_ref_cnees=out_ref_cnees,
         )
         synteny_result = write_synteny_verification(
             index_path,
@@ -273,6 +325,8 @@ def _run_workflow_in_dir(
         synteny_neighbors_path=out_synteny_neighbors,
         strict_stats_path=out_strict_stats,
         strict_summary_path=out_strict_summary,
+        culled_projections_path=out_culled_projections,
+        ref_cnees_path=out_ref_cnees,
     )
 
 

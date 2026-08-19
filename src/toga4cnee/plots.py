@@ -18,7 +18,7 @@ CATEGORY_ORDER = [
     "complex/many2many",
     "uncertain_loss",
     "lost",
-    "missing",
+    "unaligned",
 ]
 
 POSITIVE_CATEGORIES = {
@@ -375,7 +375,7 @@ def _collect_orthology_metric_values(
             raise ValueError(f"Stats file is missing columns: {', '.join(missing)}")
         for row in reader:
             category = ref_categories.get(row["cnee_uid"])
-            if category is None or category == "missing":
+            if category is None or category == "unaligned":
                 continue
             if category in POSITIVE_CATEGORIES and not stats_row_is_solid(
                 row,
@@ -629,7 +629,7 @@ def _grouped_density_svg(
         "complex/many2many": "#7c3aed",
         "uncertain_loss": "#c2410c",
         "lost": "#64748b",
-        "missing": "#111827",
+        "unaligned": "#111827",
     }
     fallback_colors = ["#be123c", "#0369a1", "#4d7c0f", "#9333ea"]
 
