@@ -6,22 +6,27 @@ Development repo for toga-like annotations of CNEEs
 Run the first workflow pass with one command:
 
 ```bash
-toga4cnee alignment.chain.gz reference_cnees.bed \
-  --out-bed query_cnees.bed \
-  --out-stats overlap_stats.tsv \
-  --ref-fasta reference.fa \
-  --query-fasta query.fa
+toga4cnee alignment.chain.gz reference_cnees.bed reference.fa query.fa \
+  --outdir results/
 ```
 
-The command indexes the chain file, finds candidate chain/CNEE pairs, computes
-overlap statistics for every candidate, writes an all-output BED/orthology TSV,
-writes strict companion outputs, and writes concise summaries. The requested
-`--out-bed`, `--out-stats`, `--out-summary`, and `--out-orthology` paths are
-the all outputs. Strict outputs are written by default as `.strict` companions,
-for example `query_cnees.strict.bed`, `overlap_stats.strict.tsv`,
-`overlap_stats.strict.summary.tsv`, and `overlap_stats.strict.orthology.tsv`.
-Use `--work-dir` to keep intermediate index and candidate TSV files.
-Diagnostic figures are generated separately from completed outputs.
+`chain_file`, `cnee_bed`, `ref_fasta`, and `query_fasta` are all required
+positional arguments. `ref_fasta`/`query_fasta` accept either FASTA or UCSC
+`.2bit` genome files, detected by content rather than file extension, and
+independently for ref and query -- a FASTA ref paired with a `.2bit` query
+(or vice versa) works. `.2bit` reading requires Biopython 1.80+ (already
+covered by this project's Biopython dependency); very large `.2bit` files
+using version-1 64-bit index offsets are not supported. The command indexes
+the chain file, finds candidate chain/CNEE pairs, computes overlap statistics
+for every candidate, and writes
+every output under `--outdir` (default: the current directory) using a fixed
+set of filenames -- see `dev_docs/output_files.md` for the full list, e.g.
+`overlap_stats.tsv`, `query_cnees.bed`, `query_ortho_status.tsv`,
+`ref_ortho_status.tsv`, `pruned_query_projections.tsv`, and the `.strict`
+companion outputs. Intermediate index/candidate files are kept under
+`<outdir>/work/`. Diagnostic figures are generated separately from completed
+outputs. Use `--query-prefix` to change the prefix on graph-assigned query
+CNEE ids (default `q_`, e.g. `q_ce1234`).
 
 The reference BED and chain file must use exactly the same chromosome/contig
 naming convention -- there is no accession-version alias fallback. A BED
@@ -34,9 +39,8 @@ The current orthology pass draws an edge for every aligned query projection and
 classifies graph components. Query-side projections are only merged into the
 same query locus when they overlap on the same strand; overlapping projections
 on opposite strands become separate loci. By default, a projection is solid
-when it has
-`fraction_gap < 0.1`; when FASTAs are supplied it must also have
-`sequence_identity > 0.7`. Both criteria must be met by the same projection --
+when it has `fraction_gap < 0.1` and `sequence_identity > 0.7`. Both criteria
+must be met by the same projection --
 metrics are never blended across the multiple projections that can share one
 ref/query edge, so an edge is solid only if at least one of its projections
 passes both checks on its own. Tune these with `--max-fraction-gap` and
@@ -44,10 +48,13 @@ passes both checks on its own. Tune these with `--max-fraction-gap` and
 a reference CNEE that has at least one solid projection. Strict output keeps
 only solid projections; references with weak aligned projections but no solid
 projection are retained as `uncertain_loss` in both modes. Categories are
-`one2one`, `one2many`, `many2one`, `lost`, `missing`, `uncertain_loss`, or the
-catch-all `complex/many2many`. The orthology TSV has three columns:
-`query_cnee_id`, `partner_ref_cnees`, and `orthology_category`; non-query
-reference outcomes are written with `NA` as the query ID.
+`one2one`, `one2many`, `many2one`, `lost`, `unaligned`, `uncertain_loss`, or the
+catch-all `complex/many2many`. The query orthology TSV (`query_ortho_status.tsv`)
+has three columns: `query_cnee_id`, `partner_ref_cnees`, and
+`orthology_category`; non-query reference outcomes are written with `NA` as
+the query ID. A separate `ref_ortho_status.tsv` reports one row per reference
+CNEE instead, including pruning counts and the pre-pruning category (see
+`dev_docs/output_files.md`).
 
 Reference CNEE identity is tracked internally by the unique `cnee_uid`, not the
 display `cnee_id` (BED column 4), so two BED intervals that happen to share a
@@ -109,17 +116,18 @@ candidates) a position interpolated from the chain blocks immediately
 flanking the candidate's gap. `synteny_matches` is `TRUE`/`FALSE` when the
 query neighbor is/isn't one of the reference neighbor's orthology partners,
 or `.` when either neighbor can't be resolved (chromosome/chain edge, or no
-query CNEE nearby). Use `--out-synteny-neighbors` to change its path (default
-derived from `--out-stats`); it reuses `--synteny-max-one2one-controls`,
+query CNEE nearby). It's always written to `overlap_stats.synteny_neighbors.tsv`
+under `--outdir`; it reuses `--synteny-max-one2one-controls`,
 `--min-sequence-identity`, and `--max-fraction-gap` and needs no ref/query
-FASTA, since it does no sequence comparison.
+FASTA itself, since it does no sequence comparison.
 
-When both `--ref-fasta` and `--query-fasta` are supplied, the stats and summary
-also include direct chain-aligned sequence identity and mismatch counts. These
-metrics require Biopython. FASTA indexing requires uniform line width within
-each record (every line except the last must be the same length); a ragged
-FASTA raises a clear error naming the offending sequence rather than silently
-computing wrong offsets -- re-wrap it to a fixed width (e.g.
+`ref_fasta` and `query_fasta` are required, so the stats and summary always
+include direct chain-aligned sequence identity and mismatch counts. These
+metrics require Biopython. A FASTA input additionally requires uniform line
+width within each record (every line except the last must be the same
+length) -- `.2bit` inputs have no such requirement, since they carry their
+own index. A ragged FASTA raises a clear error naming the offending sequence
+rather than silently computing wrong offsets -- re-wrap it to a fixed width (e.g.
 `seqkit seq -w 60 in.fa > out.fa`) and rerun.
 
 Create the summary from an existing stats file:
@@ -145,6 +153,6 @@ densities:
 python tests/plot_toga4cnee_outputs.py \
   --summary overlap_stats.summary.tsv \
   --stats overlap_stats.tsv \
-  --orthology overlap_stats.orthology.tsv \
+  --orthology query_ortho_status.tsv \
   --out-dir figures
 ```

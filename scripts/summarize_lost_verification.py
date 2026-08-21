@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from toga4cnee.chain import iter_chain_blocks
 from toga4cnee.index import load_index
 from toga4cnee.models import ChainBlock, ChainRecord
-from toga4cnee.sequence_compare import FastaAccessor
+from toga4cnee.genome_io import FastaAccessor
 from toga4cnee.synteny import BlockIndex, _flanking_blocks
 
 OUT_COLUMNS = [

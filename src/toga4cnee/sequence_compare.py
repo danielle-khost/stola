@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .genome_io import open_genome_accessor
 from .models import ChainBlock
 
 SEQUENCE_COLUMNS = [
@@ -35,183 +36,6 @@ class AlignedSegment:
     query_end: int
 
 
-@dataclass(frozen=True)
-class FastaRecordIndex:
-    seq_id: str
-    length: int
-    offset: int
-    line_bases: int
-    line_width: int
-
-
-class FastaAccessor:
-    """Random-access FASTA reader with conservative accession-version aliases."""
-
-    def __init__(self, fasta_path: str | Path, index_path: str | Path) -> None:
-        # Open the FASTA and make sure a reusable byte-offset index is available.
-        self.fasta_path = Path(fasta_path)
-        self.index_path = Path(index_path)
-        if not self.index_path.exists():
-            self._build_index()
-        self.records = self._read_index()
-        self.aliases = self._build_aliases(self.records.keys())
-        self.handle = self.fasta_path.open("rb")
-
-    @staticmethod
-    def _strip_version(seq_id: str) -> str:
-        # Remove a terminal numeric accession version from a sequence ID.
-        prefix, dot, suffix = seq_id.rpartition(".")
-        if dot and suffix.isdigit():
-            return prefix
-        return seq_id
-
-    @classmethod
-    def _build_aliases(cls, keys: Iterable[str]) -> dict[str, str]:
-        # Map exact IDs and unambiguous version-stripped IDs to FASTA records.
-        exact = {key: key for key in keys}
-        stripped: dict[str, list[str]] = {}
-        for key in exact:
-            stripped.setdefault(cls._strip_version(key), []).append(key)
-        aliases = dict(exact)
-        for key, values in stripped.items():
-            if key in aliases or len(values) != 1:
-                continue
-            aliases[key] = values[0]
-        return aliases
-
-    def _build_index(self) -> None:
-        # Scan the FASTA once and save per-record byte layout metadata.
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        rows: list[FastaRecordIndex] = []
-        current_id: str | None = None
-        current_length = 0
-        current_offset = 0
-        current_line_bases = 0
-        current_line_width = 0
-        # Byte-offset lookup in fetch() assumes every line of a record except
-        # the last has the same width. A line's own length can't be checked
-        # until we know it isn't the record's last line, so the check on line
-        # N is deferred until line N+1 (or the next header/EOF) arrives.
-        previous_line_bases: int | None = None
-        previous_line_number = 0
-        line_number = 0
-
-        with self.fasta_path.open("rb") as handle:
-            while True:
-                line_start = handle.tell()
-                line = handle.readline()
-                line_number += 1
-                if not line:
-                    break
-                if line.startswith(b">"):
-                    if current_id is not None:
-                        rows.append(
-                            FastaRecordIndex(
-                                current_id,
-                                current_length,
-                                current_offset,
-                                current_line_bases,
-                                current_line_width,
-                            )
-                        )
-                    current_id = line[1:].split(None, 1)[0].decode("utf-8")
-                    current_length = 0
-                    current_offset = handle.tell()
-                    current_line_bases = 0
-                    current_line_width = 0
-                    previous_line_bases = None
-                    continue
-                if current_id is None:
-                    raise ValueError(f"FASTA sequence encountered before header in {self.fasta_path}")
-                stripped = line.rstrip(b"\r\n")
-                if not stripped:
-                    continue
-                if previous_line_bases is not None and previous_line_bases != current_line_bases:
-                    # Fail loudly rather than silently reflow -- an incorrect
-                    # auto-fix here is worse than an error the user can act on.
-                    raise ValueError(
-                        f"{self.fasta_path}: sequence {current_id!r} has ragged "
-                        f"line wrapping -- line {previous_line_number} has "
-                        f"{previous_line_bases} bases, but the record's other "
-                        f"lines have {current_line_bases}. toga4cnee requires "
-                        "every line of a FASTA record except the last to be the "
-                        "same length. Re-wrap this file to a uniform width (e.g. "
-                        "`seqkit seq -w 60 in.fa > out.fa`) and rerun."
-                    )
-                if current_line_bases == 0:
-                    current_line_bases = len(stripped)
-                    current_line_width = len(line)
-                    current_offset = line_start
-                current_length += len(stripped)
-                previous_line_bases = len(stripped)
-                previous_line_number = line_number
-
-        if current_id is not None:
-            rows.append(
-                FastaRecordIndex(
-                    current_id,
-                    current_length,
-                    current_offset,
-                    current_line_bases,
-                    current_line_width,
-                )
-            )
-
-        with self.index_path.open("w", encoding="utf-8") as out:
-            out.write("#seq_id\tlength\toffset\tline_bases\tline_width\n")
-            for row in rows:
-                out.write(
-                    f"{row.seq_id}\t{row.length}\t{row.offset}\t"
-                    f"{row.line_bases}\t{row.line_width}\n"
-                )
-
-    def _read_index(self) -> dict[str, FastaRecordIndex]:
-        # Load saved FASTA byte-offset metadata into typed records.
-        records: dict[str, FastaRecordIndex] = {}
-        with self.index_path.open("r", encoding="utf-8") as handle:
-            for raw_line in handle:
-                line = raw_line.rstrip("\n")
-                if not line or line.startswith("#"):
-                    continue
-                seq_id, length, offset, line_bases, line_width = line.split("\t")
-                records[seq_id] = FastaRecordIndex(
-                    seq_id=seq_id,
-                    length=int(length),
-                    offset=int(offset),
-                    line_bases=int(line_bases),
-                    line_width=int(line_width),
-                )
-        return records
-
-    def fetch(self, seq_id: str, start: int, end: int) -> str:
-        # Fetch a half-open FASTA interval using byte offsets instead of scanning.
-        resolved = self.aliases.get(seq_id)
-        if resolved is None:
-            raise KeyError(f"Sequence {seq_id!r} was not found in {self.fasta_path}")
-        record = self.records[resolved]
-        if start < 0 or end < start or end > record.length:
-            raise ValueError(
-                f"Invalid interval {seq_id}:{start}-{end} for sequence length {record.length}"
-            )
-        remaining = end - start
-        position = start
-        chunks: list[bytes] = []
-        while remaining > 0:
-            line_index = position // record.line_bases
-            line_offset = position % record.line_bases
-            take = min(remaining, record.line_bases - line_offset)
-            byte_offset = record.offset + line_index * record.line_width + line_offset
-            self.handle.seek(byte_offset)
-            chunks.append(self.handle.read(take))
-            position += take
-            remaining -= take
-        return b"".join(chunks).decode("ascii").upper()
-
-    def close(self) -> None:
-        # Close the underlying FASTA file handle.
-        self.handle.close()
-
-
 class SequenceComparator:
     """Compare reference and query sequence implied by chain aligned blocks."""
 
@@ -221,14 +45,15 @@ class SequenceComparator:
         query_fasta: str | Path,
         work_dir: str | Path,
     ) -> None:
-        # Prepare random-access readers for the reference and query FASTA files.
+        # Prepare random-access readers for the reference and query genome
+        # files -- each independently either FASTA or .2bit (see genome_io.py).
         work_path = Path(work_dir)
         work_path.mkdir(parents=True, exist_ok=True)
-        self.ref = FastaAccessor(ref_fasta, work_path / "ref_fasta.idx")
-        self.query = FastaAccessor(query_fasta, work_path / "query_fasta.idx")
+        self.ref = open_genome_accessor(ref_fasta, work_path / "ref_fasta.idx")
+        self.query = open_genome_accessor(query_fasta, work_path / "query_fasta.idx")
 
     def close(self) -> None:
-        # Close both FASTA readers held by the comparator.
+        # Close both genome readers held by the comparator.
         self.ref.close()
         self.query.close()
 

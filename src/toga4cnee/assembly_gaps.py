@@ -4,10 +4,11 @@ Scaffolded assemblies typically mark the join between two contigs with a run
 of N bases. Some assemblies pad every "gap of unknown size" to one fixed
 length (a real, but never fully standardized, convention), while others
 record estimated gap sizes instead. Without an AGP file, the only evidence
-available is the empirical distribution of N-run lengths in the FASTA
-itself: when one (or a small handful of) length(s) clearly dominate, that's
-good evidence of a fixed-length convention; when lengths are too spread out
-or there are too few gaps at all, there's nothing to confidently infer.
+available is the empirical distribution of N-run lengths in the genome file
+itself (FASTA or .2bit -- see genome_io.py): when one (or a small handful
+of) length(s) clearly dominate, that's good evidence of a fixed-length
+convention; when lengths are too spread out or there are too few gaps at
+all, there's nothing to confidently infer.
 """
 
 from __future__ import annotations
@@ -19,7 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-N_RUN_RE = re.compile(rb"[Nn]+")
+from .genome_io import iter_named_sequences
+
+# Sequences are already uppercased by iter_named_sequences.
+N_RUN_RE = re.compile(r"N+")
 
 # Below this length, an isolated N is more likely a single low-confidence
 # basecall embedded in otherwise-real sequence than a deliberate gap marker.
@@ -65,34 +69,19 @@ class GapConvention:
     length_counts: Counter
 
 
-def iter_n_runs(fasta_path: str | Path) -> Iterator[NRun]:
-    """Yield every maximal run of N in a FASTA, one record at a time.
+def iter_n_runs(genome_path: str | Path) -> Iterator[NRun]:
+    """Yield every maximal run of N in a genome file (FASTA or .2bit).
 
-    Streams one record at a time (never holds more than one sequence in
-    memory) so it scales to whole-genome multi-GB FASTAs. Only ever finds
-    gaps *within* a record (a contig join inside a scaffold/chromosome) --
-    a gap *between* scaffolds is just two separate FASTA records and leaves
-    no N-run to find.
+    Delegates to iter_named_sequences (genome_io.py) for one record's full
+    sequence at a time (never holds more than one sequence in memory), so it
+    scales to whole-genome multi-GB inputs regardless of format. Only ever
+    finds gaps *within* a record (a contig join inside a scaffold/chromosome)
+    -- a gap *between* scaffolds is just two separate records and leaves no
+    N-run to find.
     """
-    chrom: str | None = None
-    buffer: list[bytes] = []
-
-    def _flush() -> Iterator[NRun]:
-        if chrom is None or not buffer:
-            return
-        seq = b"".join(buffer)
-        for match in N_RUN_RE.finditer(seq):
+    for chrom, sequence in iter_named_sequences(genome_path):
+        for match in N_RUN_RE.finditer(sequence):
             yield NRun(chrom, match.start(), match.end())
-
-    with Path(fasta_path).open("rb") as handle:
-        for raw_line in handle:
-            if raw_line.startswith(b">"):
-                yield from _flush()
-                chrom = raw_line[1:].split(None, 1)[0].decode("utf-8")
-                buffer = []
-                continue
-            buffer.append(raw_line.rstrip(b"\r\n"))
-        yield from _flush()
 
 
 def infer_gap_convention(
@@ -154,15 +143,16 @@ class NRunIndex:
 
 
 def scan_query_assembly_gaps(
-    fasta_path: str | Path, min_gap_length: int = DEFAULT_MIN_GAP_LENGTH
+    genome_path: str | Path, min_gap_length: int = DEFAULT_MIN_GAP_LENGTH
 ) -> tuple[GapConvention, NRunIndex]:
-    """Scan a query FASTA and return its gap convention plus a boundary index.
+    """Scan a query genome (FASTA or .2bit) and return its gap convention
+    plus a boundary index.
 
     The returned NRunIndex is built only from N-runs whose length is one of
     the convention's trusted boundary_lengths -- empty (matches nothing) when
     confidence is "none", by construction.
     """
-    runs = list(iter_n_runs(fasta_path))
+    runs = list(iter_n_runs(genome_path))
     convention = infer_gap_convention(runs, min_gap_length)
     boundary_runs = [run for run in runs if run.length in convention.boundary_lengths]
     return convention, NRunIndex(boundary_runs)

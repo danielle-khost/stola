@@ -12,21 +12,17 @@ PREFIX="morBass"
 PYTHONPATH=src python -m toga4cnee.cli run \
   $CHAIN \
   $REFBED \
-  --out-bed ${OUTPATH}/query_cnees.bed \
-  --out-stats ${OUTPATH}/overlap_stats.tsv \
-  --out-summary ${OUTPATH}/overlap_stats.summary.tsv \
-  --out-orthology ${OUTPATH}/overlap_stats.orthology.tsv \
-  --ref-fasta $REFFASTA \
-  --query-fasta $QUERYFASTA \
+  $REFFASTA \
+  $QUERYFASTA \
+  --outdir $OUTPATH \
   --max-fraction-gap 0.1 \
-  --min-sequence-identity 0.7 \
-  --work-dir ${OUTPATH}/work
+  --min-sequence-identity 0.7
 
 
 python tests/plot_toga4cnee_outputs.py \
   --summary ${OUTPATH}/overlap_stats.summary.tsv \
   --stats ${OUTPATH}/overlap_stats.tsv \
-  --orthology ${OUTPATH}/overlap_stats.orthology.tsv \
+  --orthology ${OUTPATH}/query_ortho_status.tsv \
   --out-dir ${OUTPATH}/figures \
   --prefix $PREFIX \
   --max-fraction-gap 0.1 \

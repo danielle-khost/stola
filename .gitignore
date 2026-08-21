@@ -22,3 +22,5 @@ dummy*
 *.sizes
 *.paf
 *.pif.*
+.DS_Store
+*.2bit

@@ -10,6 +10,7 @@ from .orthology import (
     DEFAULT_MIN_ALIGN_SCORE,
     DEFAULT_MIN_GAP_LENGTH,
     DEFAULT_MIN_NEIGHBOR_FRACTION,
+    DEFAULT_QUERY_ID_PREFIX,
     DEFAULT_VERIFICATION_NUM_NEIGHBORS,
 )
 from .plots import write_qc_plots
@@ -19,32 +20,14 @@ from .workflow import run_workflow
 
 
 def _run(args: argparse.Namespace) -> None:
-    # Resolve default output paths and launch the full one-command workflow.
-    out_summary = (
-        args.out_summary
-        if args.out_summary is not None
-        else args.out_stats.with_suffix(".summary.tsv")
-    )
-    out_orthology = (
-        args.out_orthology
-        if args.out_orthology is not None
-        else args.out_stats.with_suffix(".orthology.tsv")
-    )
+    # Launch the full one-command workflow; every output lands under args.outdir.
     result = run_workflow(
         args.chain_file,
         args.cnee_bed,
-        args.out_bed,
-        args.out_stats,
-        out_summary=out_summary,
-        out_orthology=out_orthology,
-        out_strict_stats=args.out_strict_stats,
-        out_strict_summary=args.out_strict_summary,
-        out_synteny=args.out_synteny,
-        out_synteny_neighbors=args.out_synteny_neighbors,
-        out_culled_projections=args.out_culled_projections,
-        out_ref_cnees=args.out_ref_cnees,
-        ref_fasta=args.ref_fasta,
-        query_fasta=args.query_fasta,
+        args.ref_fasta,
+        args.query_fasta,
+        outdir=args.outdir,
+        query_id_prefix=args.query_prefix,
         synteny_flank_sizes=args.synteny_flank_sizes,
         synteny_max_one2one_controls=args.synteny_max_one2one_controls,
         min_sequence_identity=args.min_sequence_identity,
@@ -54,20 +37,19 @@ def _run(args: argparse.Namespace) -> None:
         min_neighbor_fraction=args.min_neighbor_fraction,
         verification_num_neighbors=args.verification_num_neighbors,
         min_gap_length=args.min_gap_length,
-        work_dir=args.work_dir,
     )
     print(f"Indexed {result.chain_count} chains")
-    print(f"Wrote {result.stats_count} all overlap-stat rows -> {args.out_stats}")
+    print(f"Wrote {result.stats_count} all overlap-stat rows -> {result.stats_path}")
     print(
         f"Wrote {result.strict_stats_count} strict overlap-stat rows -> "
         f"{result.strict_stats_path}"
     )
-    print(f"Wrote {result.query_bed_count} query CNEE BED rows -> {args.out_bed}")
+    print(f"Wrote {result.query_bed_count} query CNEE BED rows -> {result.query_bed_path}")
     print(
-        f"Wrote {result.orthology_result.orthology_rows} orthology rows -> "
-        f"{out_orthology}"
+        f"Wrote {result.orthology_result.orthology_rows} query orthology rows -> "
+        f"{result.orthology_path}"
     )
-    print(f"Wrote {result.summary_count} all CNEE summary rows -> {out_summary}")
+    print(f"Wrote {result.summary_count} all CNEE summary rows -> {result.summary_path}")
     print(
         f"Wrote {result.strict_summary_count} strict CNEE summary rows -> "
         f"{result.strict_summary_path}"
@@ -81,15 +63,14 @@ def _run(args: argparse.Namespace) -> None:
         f"{result.synteny_neighbors_path}"
     )
     print(
-        f"Wrote {result.orthology_result.culled_projection_rows} culled-projection rows -> "
+        f"Wrote {result.orthology_result.culled_projection_rows} pruned-projection rows -> "
         f"{result.culled_projections_path}"
     )
     print(
-        f"Wrote {result.orthology_result.ref_cnee_rows} ref CNEE summary rows -> "
+        f"Wrote {result.orthology_result.ref_cnee_rows} ref orthology rows -> "
         f"{result.ref_cnees_path}"
     )
-    if args.work_dir is not None:
-        print(f"Kept intermediates in {args.work_dir}")
+    print(f"All outputs and intermediates written under {result.outdir}")
 
 
 def _summarize(args: argparse.Namespace) -> None:
@@ -143,68 +124,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("chain_file", type=Path, help="Input .chain or .chain.gz file")
     run_parser.add_argument("cnee_bed", type=Path, help="Reference CNEE BED3+ file")
+    run_parser.add_argument("ref_fasta", type=Path, help="Reference genome, FASTA or .2bit")
+    run_parser.add_argument("query_fasta", type=Path, help="Query genome, FASTA or .2bit")
     run_parser.add_argument(
-        "--out-bed", required=True, type=Path, help="Output graph-assigned query CNEE BED"
-    )
-    run_parser.add_argument(
-        "--out-stats", required=True, type=Path, help="Output overlap stats TSV"
-    )
-    run_parser.add_argument(
-        "--out-summary",
+        "-o",
+        "--outdir",
         type=Path,
-        default=None,
-        help="Concise per-reference-CNEE summary TSV [default: OUT_STATS with .summary.tsv suffix]",
-    )
-    run_parser.add_argument(
-        "--out-orthology",
-        type=Path,
-        default=None,
-        help="Graph-based orthology classification TSV [default: OUT_STATS with .orthology.tsv suffix]",
-    )
-    run_parser.add_argument(
-        "--out-strict-stats",
-        type=Path,
-        default=None,
-        help="Strict solid-only overlap stats TSV [default: OUT_STATS with .strict before extension]",
-    )
-    run_parser.add_argument(
-        "--out-strict-summary",
-        type=Path,
-        default=None,
-        help="Strict per-reference-CNEE summary TSV [default: OUT_STATS with .strict.summary before extension]",
-    )
-    run_parser.add_argument(
-        "--out-synteny",
-        type=Path,
-        default=None,
-        help="Flanking-synteny verification TSV [default: OUT_STATS with .synteny before extension]",
-    )
-    run_parser.add_argument(
-        "--out-synteny-neighbors",
-        type=Path,
-        default=None,
+        default=".",
         help=(
-            "Left/right flanking-CNEE synteny check TSV [default: OUT_STATS with "
-            ".synteny_neighbors before extension]"
+            "Directory for all outputs and intermediates (created if missing) "
+            "[default: current directory]. See output_files.md for the fixed "
+            "filenames written underneath it."
         ),
     )
     run_parser.add_argument(
-        "--out-culled-projections",
-        type=Path,
-        default=None,
+        "--query-prefix",
+        type=str,
+        default=DEFAULT_QUERY_ID_PREFIX,
         help=(
-            "Per-projection log of synteny-verification prunes TSV [default: "
-            "OUT_STATS with .culled_projections before extension]"
-        ),
-    )
-    run_parser.add_argument(
-        "--out-ref-cnees",
-        type=Path,
-        default=None,
-        help=(
-            "One row per reference CNEE, with pruning counts and pre/post-pruning "
-            "category (see output_files.md) TSV [default: OUT_STATS with .ref_cnees "
-            "before extension]"
+            "Prefix for every graph-assigned query CNEE id, e.g. 'q_ce1234' "
+            f"[default: {DEFAULT_QUERY_ID_PREFIX!r}]"
         ),
     )
     run_parser.add_argument(
@@ -228,10 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-sequence-identity",
         type=float,
         default=0.7,
-        help=(
-            "Minimum sequence identity for a solid orthology edge when FASTAs "
-            "are supplied [default: 0.7]"
-        ),
+        help="Minimum sequence identity for a solid orthology edge [default: 0.7]",
     )
     run_parser.add_argument(
         "--max-fraction-gap",
@@ -286,27 +222,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Minimum N-run length in the query FASTA considered a candidate "
             "deliberate assembly-gap marker, when inferring contig boundaries "
             f"for lost-ref sub-categorization [default: {DEFAULT_MIN_GAP_LENGTH}]"
-        ),
-    )
-    run_parser.add_argument(
-        "--ref-fasta",
-        type=Path,
-        default=None,
-        help="Reference genome FASTA for sequence identity/mismatch metrics",
-    )
-    run_parser.add_argument(
-        "--query-fasta",
-        type=Path,
-        default=None,
-        help="Query genome FASTA for sequence identity/mismatch metrics",
-    )
-    run_parser.add_argument(
-        "--work-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Optional directory for intermediate index/candidate files. If omitted, "
-            "intermediates are created in a temporary directory."
         ),
     )
     run_parser.set_defaults(func=_run)

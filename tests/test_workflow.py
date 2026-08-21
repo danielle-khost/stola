@@ -1,5 +1,6 @@
 import csv
 import gzip
+import struct
 import sys
 import tempfile
 import unittest
@@ -57,6 +58,91 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return chain, bed
+
+
+def _write_fasta(path: Path, records: dict[str, str], width: int = 60) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for name, seq in records.items():
+            handle.write(f">{name}\n")
+            for i in range(0, len(seq), width):
+                handle.write(seq[i : i + width] + "\n")
+
+
+def _write_fasta_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    # Homopolymer ref/query built from a complementary base pair (A/T), so a
+    # minus-strand block's reverse-complemented query fetch is still a clean
+    # 100% match against the ref regardless of phase/offset -- these tests
+    # care about gap fraction (from the chain itself), not sequence content.
+    ref_fasta = tmp_path / "ref.fa"
+    query_fasta = tmp_path / "query.fa"
+    _write_fasta(ref_fasta, {"chr1": "A" * 1000, "chr2": "A" * 1000})
+    _write_fasta(query_fasta, {"chrQ": "T" * 1000, "chrQ2": "T" * 1000, "chrQ3": "T" * 1000})
+    return ref_fasta, query_fasta
+
+
+# UCSC .2bit two-bit-per-base encoding, empirically verified by round-tripping
+# through Bio.SeqIO.TwoBitIO.TwoBitIterator (Biopython's decoder is a compiled
+# extension, so this was confirmed by brute-force trial rather than taken on
+# faith from the spec): T=0, C=1, A=2, G=3, packed 4 bases/byte MSB-first.
+_TWOBIT_BASE_CODES = {"T": 0, "C": 1, "A": 2, "G": 3}
+
+
+def _write_twobit(path: Path, records: dict[str, str]) -> None:
+    # Hand-build a minimal valid .2bit file: header, name/offset index, then
+    # per-sequence dnaSize + nBlocks (N-runs) + maskBlocks (lowercase runs) +
+    # packed sequence. No real 2bit-writing tool is used anywhere in this
+    # pipeline or in Biopython (which only reads .2bit), so this is the only
+    # way to get a small, fast, from-scratch test fixture.
+    header = struct.pack("<IIII", 0x1A412743, 0, len(records), 0)
+    index_entries = [(name.encode("ascii"), len(name.encode("ascii"))) for name in records]
+    index_total_len = sum(1 + n + 4 for _, n in index_entries)
+    cursor = len(header) + index_total_len
+
+    def _runs(text: str, predicate) -> list[tuple[int, int]]:
+        runs: list[tuple[int, int]] = []
+        start = None
+        for i, c in enumerate(text):
+            if predicate(c) and start is None:
+                start = i
+            elif not predicate(c) and start is not None:
+                runs.append((start, i))
+                start = None
+        if start is not None:
+            runs.append((start, len(text)))
+        return runs
+
+    seq_blobs = []
+    offsets = []
+    for name, seq in records.items():
+        offsets.append(cursor)
+        upper_seq = seq.upper()
+        n_blocks = _runs(upper_seq, lambda c: c == "N")
+        mask_blocks = _runs(seq, str.islower)
+
+        codes = [_TWOBIT_BASE_CODES.get(c, 0) for c in upper_seq]
+        packed = bytearray()
+        for i in range(0, len(codes), 4):
+            chunk = codes[i : i + 4]
+            chunk = chunk + [0] * (4 - len(chunk))
+            packed.append((chunk[0] << 6) | (chunk[1] << 4) | (chunk[2] << 2) | chunk[3])
+
+        rec = struct.pack("<I", len(seq))
+        rec += struct.pack("<I", len(n_blocks))
+        rec += b"".join(struct.pack("<I", s) for s, _ in n_blocks)
+        rec += b"".join(struct.pack("<I", e - s) for s, e in n_blocks)
+        rec += struct.pack("<I", len(mask_blocks))
+        rec += b"".join(struct.pack("<I", s) for s, _ in mask_blocks)
+        rec += b"".join(struct.pack("<I", e - s) for s, e in mask_blocks)
+        rec += struct.pack("<I", 0)
+        rec += bytes(packed)
+        seq_blobs.append(rec)
+        cursor += len(rec)
+
+    index_bytes = b"".join(
+        struct.pack("<B", n) + name_b + struct.pack("<I", offset)
+        for (name_b, n), offset in zip(index_entries, offsets)
+    )
+    path.write_bytes(header + index_bytes + b"".join(seq_blobs))
 
 
 def _read_tsv(path: Path) -> list[dict[str, str]]:
@@ -297,30 +383,16 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             chain, bed = _write_inputs(tmp_path)
-            stats = tmp_path / "overlap_stats.tsv"
-            query_bed = tmp_path / "query_cnees.bed"
-            summary = tmp_path / "summary.tsv"
-            orthology = tmp_path / "orthology.tsv"
-            work_dir = tmp_path / "work"
+            ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
 
-            result = run_workflow(
-                chain,
-                bed,
-                query_bed,
-                stats,
-                out_summary=summary,
-                out_orthology=orthology,
-                work_dir=work_dir,
-            )
-            stats_rows = _read_tsv(stats)
-            bed_lines = query_bed.read_text(encoding="utf-8").splitlines()
-            summary_rows = _read_tsv(summary)
-            orthology_rows = _read_tsv(orthology)
-            strict_stats_rows = _read_tsv(tmp_path / "overlap_stats.strict.tsv")
-            strict_summary_rows = _read_tsv(
-                tmp_path / "overlap_stats.strict.summary.tsv"
-            )
-            synteny_rows = _read_tsv(tmp_path / "overlap_stats.synteny.tsv")
+            result = run_workflow(chain, bed, ref_fasta, query_fasta, outdir=tmp_path)
+            stats_rows = _read_tsv(result.stats_path)
+            bed_lines = result.query_bed_path.read_text(encoding="utf-8").splitlines()
+            summary_rows = _read_tsv(result.summary_path)
+            orthology_rows = _read_tsv(result.orthology_path)
+            strict_stats_rows = _read_tsv(result.strict_stats_path)
+            strict_summary_rows = _read_tsv(result.strict_summary_path)
+            synteny_rows = _read_tsv(result.synteny_path)
 
         self.assertEqual(result.chain_count, 3)
         self.assertEqual(result.candidate_count, 3)
@@ -621,6 +693,59 @@ class WorkflowTests(unittest.TestCase):
             row["query_cnee_id"]: row["orthology_category"] for row in rows
         }
         self.assertEqual(categories_by_query["q_CNEE_A"], "one2one")
+
+    def test_classify_orthology_uses_custom_query_id_prefix(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from toga4cnee.orthology import classify_orthology
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bed = tmp_path / "cnees.bed"
+            stats = tmp_path / "stats.tsv"
+            orthology = tmp_path / "orthology.tsv"
+            query_bed = tmp_path / "query.bed"
+            bed.write_text("chr1\t0\t50\tCNEE_A\n", encoding="utf-8")
+            stats.write_text(
+                "\t".join(
+                    [
+                        "cnee_uid",
+                        "ref_chrom",
+                        "ref_start",
+                        "ref_end",
+                        "chain_id",
+                        "aligned_bases",
+                        "query_chrom",
+                        "query_strand",
+                        "query_aligned_start",
+                        "query_aligned_end",
+                        "query_projection_name",
+                        "gap_fraction_within_chain_span",
+                        "seq_identity",
+                        "rank_by_chain_score",
+                    ]
+                )
+                + "\n"
+                + "CNEE_A\tchr1\t0\t50\t1\t50\tchrQ\t+\t100\t150\tA#1\t0.05\t0.8\t1\n",
+                encoding="utf-8",
+            )
+
+            result = classify_orthology(
+                stats,
+                bed,
+                tmp_path / "unused_index.json",
+                orthology,
+                query_bed,
+                synteny_check=False,
+                query_id_prefix="cust_",
+            )
+            rows = _read_tsv(orthology)
+            bed_lines = query_bed.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.query_bed_rows, 1)
+        query_ids = {row["query_cnee_id"] for row in rows}
+        self.assertEqual(query_ids, {"cust_CNEE_A"})
+        self.assertEqual(bed_lines, ["chrQ\t100\t150\tcust_CNEE_A\t0\t+"])
 
     def test_synteny_verification_v2_promotes_syntenic_weak_call_and_culls_mismatched_one(
         self,
@@ -1774,7 +1899,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Gap fraction density for multi-query CNEEs", gap_text)
 
     def test_fasta_accessor_fetches_correctly_across_wrapped_lines(self) -> None:
-        from toga4cnee.sequence_compare import FastaAccessor
+        from toga4cnee.genome_io import FastaAccessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1794,7 +1919,7 @@ class WorkflowTests(unittest.TestCase):
                 accessor.close()
 
     def test_fasta_accessor_rejects_ragged_line_wrapping(self) -> None:
-        from toga4cnee.sequence_compare import FastaAccessor
+        from toga4cnee.genome_io import FastaAccessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1810,6 +1935,118 @@ class WorkflowTests(unittest.TestCase):
 
         self.assertIn("ragged", str(ctx.exception))
         self.assertIn("chr1", str(ctx.exception))
+
+    def test_sniff_genome_format_detects_twobit_vs_fasta(self) -> None:
+        from toga4cnee.genome_io import sniff_genome_format
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            twobit = tmp_path / "genome.2bit"
+            fasta = tmp_path / "genome.fa"
+            _write_twobit(twobit, {"chr1": "ACGT"})
+            fasta.write_text(">chr1\nACGT\n", encoding="utf-8")
+
+            self.assertEqual(sniff_genome_format(twobit), "twobit")
+            self.assertEqual(sniff_genome_format(fasta), "fasta")
+
+    def test_twobit_accessor_fetches_bases_n_blocks_and_version_alias(self) -> None:
+        from toga4cnee.genome_io import TwoBitAccessor
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            twobit = tmp_path / "genome.2bit"
+            # Mixed real bases, an N-block, and a soft-masked (lowercase) run
+            # -- fetch() always upper-cases, so the mask shouldn't change the
+            # returned bases, only exercise that decoding doesn't choke on it.
+            _write_twobit(twobit, {"NC_000001.1": "ACGTNNNNacgtACGT"})
+            accessor = TwoBitAccessor(twobit)
+            try:
+                self.assertEqual(accessor.fetch("NC_000001.1", 0, 16), "ACGTNNNNACGTACGT")
+                self.assertEqual(accessor.fetch("NC_000001.1", 4, 8), "NNNN")
+                # Unversioned alias resolves unambiguously to the one record.
+                self.assertEqual(accessor.fetch("NC_000001", 0, 4), "ACGT")
+                with self.assertRaises(KeyError):
+                    accessor.fetch("no_such_chrom", 0, 1)
+                with self.assertRaises(ValueError):
+                    accessor.fetch("NC_000001.1", 0, 100)
+            finally:
+                accessor.close()
+
+    def test_open_genome_accessor_dispatches_on_sniffed_format(self) -> None:
+        from toga4cnee.genome_io import FastaAccessor, TwoBitAccessor, open_genome_accessor
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            twobit = tmp_path / "genome.2bit"
+            fasta = tmp_path / "genome.fa"
+            _write_twobit(twobit, {"chr1": "ACGT"})
+            fasta.write_text(">chr1\nACGT\n", encoding="utf-8")
+
+            twobit_accessor = open_genome_accessor(twobit, tmp_path / "unused.idx")
+            fasta_accessor = open_genome_accessor(fasta, tmp_path / "genome.idx")
+            try:
+                self.assertIsInstance(twobit_accessor, TwoBitAccessor)
+                self.assertIsInstance(fasta_accessor, FastaAccessor)
+                self.assertEqual(twobit_accessor.fetch("chr1", 0, 4), "ACGT")
+                self.assertEqual(fasta_accessor.fetch("chr1", 0, 4), "ACGT")
+            finally:
+                twobit_accessor.close()
+                fasta_accessor.close()
+
+    def test_iter_n_runs_matches_between_fasta_and_twobit_for_same_content(self) -> None:
+        from toga4cnee.assembly_gaps import iter_n_runs
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            twobit = tmp_path / "genome.2bit"
+            fasta = tmp_path / "genome.fa"
+            records = {
+                "chr1": "ACGT" + "N" * 100 + "ACGT" + "N" * 25 + "A",
+                "chr2": "N" * 5 + "ACGTACGT",
+            }
+            _write_twobit(twobit, records)
+            _write_fasta(fasta, records)
+
+            fasta_runs = {(r.chrom, r.start, r.end) for r in iter_n_runs(fasta)}
+            twobit_runs = {(r.chrom, r.start, r.end) for r in iter_n_runs(twobit)}
+            self.assertEqual(fasta_runs, twobit_runs)
+            self.assertEqual(
+                fasta_runs,
+                {("chr1", 4, 104), ("chr1", 108, 133), ("chr2", 0, 5)},
+            )
+
+    def test_sequence_comparator_supports_mixed_fasta_and_twobit_genomes(self) -> None:
+        try:
+            import Bio  # noqa: F401
+        except ImportError:
+            self.skipTest("Biopython is not installed")
+        from toga4cnee.chain import iter_chain_blocks
+        from toga4cnee.sequence_compare import aligned_segments_for_interval
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            ref_fasta = tmp_path / "ref.fa"
+            ref_twobit = tmp_path / "ref.2bit"
+            query_fasta = tmp_path / "query.fa"
+            _write_fasta(ref_fasta, {"chr1": "ACGTACGTAC"})
+            _write_twobit(ref_twobit, {"chr1": "ACGTACGTAC"})
+            _write_fasta(query_fasta, {"chrQ": "ACGTACGAAC"})  # one mismatch at position 7
+
+            chain_text = "chain 100 chr1 10 + 0 10 chrQ 10 + 0 10 1\n10\n"
+            blocks = iter_chain_blocks(chain_text)
+            segments = aligned_segments_for_interval(blocks, 0, 10, "+")
+
+            baseline = SequenceComparator(ref_fasta, query_fasta, tmp_path / "work_fasta")
+            mixed = SequenceComparator(ref_twobit, query_fasta, tmp_path / "work_mixed")
+            try:
+                baseline_metrics = baseline.compare("chr1", 0, 10, "chrQ", "+", segments)
+                mixed_metrics = mixed.compare("chr1", 0, 10, "chrQ", "+", segments)
+            finally:
+                baseline.close()
+                mixed.close()
+
+            self.assertEqual(mixed_metrics, baseline_metrics)
+            self.assertEqual(baseline_metrics["seq_mismatches"], 1)
 
     def test_sequence_comparison_metrics_for_plus_strand_projection(self) -> None:
         try:

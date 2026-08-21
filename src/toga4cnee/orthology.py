@@ -53,6 +53,9 @@ DEFAULT_VERIFICATION_NUM_NEIGHBORS = 5
 # orthology_classification.md and assembly_gaps.py.
 UNCERTAIN_LOSS_TYPE_CATEGORY = "missing/loss"
 
+# Prefix prepended to every graph-assigned query CNEE id (e.g. "q_ce1234").
+DEFAULT_QUERY_ID_PREFIX = "q_"
+
 
 @dataclass(frozen=True)
 class Projection:
@@ -156,6 +159,7 @@ def classify_orthology(
     query_fasta: str | Path | None = None,
     min_gap_length: int = DEFAULT_MIN_GAP_LENGTH,
     out_ref_cnees: str | Path | None = None,
+    query_id_prefix: str = DEFAULT_QUERY_ID_PREFIX,
 ) -> OrthologyResult:
     """Classify query CNEE loci from overlap stats and write TSV/BED outputs.
 
@@ -202,6 +206,9 @@ def classify_orthology(
     sub-categorization, plus per-ref pruning counts, is written to
     out_ref_cnees if given (see output_files.md) -- out_orthology's own
     "lost"/"unaligned" labels are unaffected either way.
+
+    Every graph-assigned query CNEE id is prefixed with query_id_prefix
+    (default "q_", e.g. "q_ce1234").
     """
     if min_sequence_identity < 0 or min_sequence_identity > 1:
         raise ValueError("min_sequence_identity must be between 0 and 1")
@@ -245,7 +252,7 @@ def classify_orthology(
         final_graph = initial_graph
 
     components = [set(component) for component in nx.connected_components(final_graph)]
-    _assign_orthology_categories(components, final_clusters)
+    _assign_orthology_categories(components, final_clusters, query_id_prefix)
     orthology_count = _write_orthology_tsv(
         final_clusters,
         ref_ids,
@@ -755,6 +762,7 @@ def _classify_lost_refs(
 def _assign_orthology_categories(
     components: list[set[str]],
     clusters: list[QueryCluster],
+    query_id_prefix: str,
 ) -> None:
     # Assign query IDs and broad orthology categories from graph components.
     # A surviving lone ref/query edge is always "one2one" -- if it started
@@ -774,20 +782,20 @@ def _assign_orthology_categories(
         ref_ids = [_node_ref_id(node) for node in ref_nodes]
         if len(ref_nodes) == 1 and len(query_nodes) == 1:
             category = "one2one"
-            query_ids = [f"q_{_clean_id(ref_ids[0])}"]
+            query_ids = [f"{query_id_prefix}{_clean_id(ref_ids[0])}"]
         elif len(ref_nodes) == 1 and len(query_nodes) > 1:
             category = "one2many"
             query_ids = [
-                f"q_{_clean_id(ref_ids[0])}_{index}"
+                f"{query_id_prefix}{_clean_id(ref_ids[0])}_{index}"
                 for index in range(1, len(query_nodes) + 1)
             ]
         elif len(ref_nodes) > 1 and len(query_nodes) == 1:
             category = "many2one"
-            query_ids = [f"q_many2one_{component_counter:06d}"]
+            query_ids = [f"{query_id_prefix}many2one_{component_counter:06d}"]
         else:
             category = "complex/many2many"
             query_ids = [
-                f"q_complex_{component_counter:06d}_{index}"
+                f"{query_id_prefix}complex_{component_counter:06d}_{index}"
                 for index in range(1, len(query_nodes) + 1)
             ]
 

@@ -1,20 +1,20 @@
 #!/usr/bin/env python
 """CLI wrapper for toga4cnee.assembly_gaps -- report a genome's inferred gap convention.
 
-See toga4cnee/assembly_gaps.py for the algorithm. This script scans a FASTA,
-writes every N-run found to a TSV, and prints the length distribution plus
-the confidence verdict.
+See toga4cnee/assembly_gaps.py for the algorithm. This script scans a genome
+file (FASTA or .2bit) and prints the N-run length distribution plus the
+confidence verdict -- useful for sanity-checking --min-gap-length against a
+specific genome before a real `toga4cnee run`, which does this same
+inference internally.
 
 Example:
     PYTHONPATH=src python scripts/infer_contig_boundaries.py \\
-        --fasta tests/GCF_036013475.1_bColLiv1.pat.W.v2_genomic.fna \\
-        --out tests/test_runs/colLivi/query_n_runs.tsv
+        --genome tests/GCF_036013475.1_bColLiv1.pat.W.v2_genomic.2bit
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import sys
 from pathlib import Path
 
@@ -30,8 +30,7 @@ from toga4cnee.assembly_gaps import (
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fasta", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path, help="Per-N-run TSV output path")
+    parser.add_argument("--genome", required=True, type=Path, help="Genome FASTA or .2bit file")
     parser.add_argument(
         "--min-gap-length",
         type=int,
@@ -43,16 +42,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    print(f"Scanning {args.fasta} for N-runs...", file=sys.stderr)
-    runs = list(iter_n_runs(args.fasta))
+    print(f"Scanning {args.genome} for N-runs...", file=sys.stderr)
+    runs = list(iter_n_runs(args.genome))
     print(f"  found {len(runs)} N-run(s) across the genome", file=sys.stderr)
-
-    with args.out.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(["chrom", "start", "end", "length"])
-        for run in runs:
-            writer.writerow([run.chrom, run.start, run.end, run.length])
-    print(f"Wrote {len(runs)} rows -> {args.out}")
 
     convention = infer_gap_convention(runs, args.min_gap_length)
 
@@ -98,8 +90,8 @@ def main(argv: list[str] | None = None) -> None:
             "  Could not confidently infer a fixed gap-length convention -- run "
             "lengths are too spread out (no length or small set of lengths "
             "dominates). This assembly likely records estimated gap sizes rather "
-            "than a fixed placeholder, or mixes conventions. See the full "
-            "distribution above/in --out to judge by eye."
+            "than a fixed placeholder, or mixes conventions. See the length "
+            "distribution above to judge by eye."
         )
 
 
