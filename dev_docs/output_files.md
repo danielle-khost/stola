@@ -2,7 +2,7 @@
 
 Everything below is written under a single `-o/--outdir` (default: current
 directory) -- there's no way to redirect an individual file to a different
-location. Intermediates (chain index, candidate TSV, FASTA byte-offset
+location. Intermediates (chain index, candidate TSV, FASTA/2bit byte-offset
 indexes) live under `<outdir>/work/`.
 
 ## Main output
@@ -17,6 +17,10 @@ indexes) live under `<outdir>/work/`.
 - `pruned_query_projections.tsv` -- per-projection log of synteny-verification prunes
 
 ## "Development output"
-Output from development/exploratory output, keep all this for now:
-`overlap_stats.strict.tsv`, `overlap_stats.strict.summary.tsv`,
-`overlap_stats.synteny.tsv`, `overlap_stats.synteny_neighbors.tsv`. 
+Exploratory/diagnostic output, not considered main pipeline output -- lives
+under `<outdir>/work/` alongside the other intermediates rather than in
+`--outdir` itself: `work/overlap_stats.synteny.tsv`,
+`work/overlap_stats.synteny_neighbors.tsv`.
+
+"Strict" (solid-projections-only) output was removed -- it had fallen out of
+use and wasn't adding signal beyond the all-projections output.

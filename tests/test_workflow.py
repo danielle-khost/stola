@@ -390,14 +390,11 @@ class WorkflowTests(unittest.TestCase):
             bed_lines = result.query_bed_path.read_text(encoding="utf-8").splitlines()
             summary_rows = _read_tsv(result.summary_path)
             orthology_rows = _read_tsv(result.orthology_path)
-            strict_stats_rows = _read_tsv(result.strict_stats_path)
-            strict_summary_rows = _read_tsv(result.strict_summary_path)
             synteny_rows = _read_tsv(result.synteny_path)
 
         self.assertEqual(result.chain_count, 3)
         self.assertEqual(result.candidate_count, 3)
         self.assertEqual(result.stats_count, 3)
-        self.assertEqual(result.strict_stats_count, 1)
         # CNEE_PARTIAL spans two candidate chains (chrQ, chrQ2) -- an initial
         # one2many shape needing verification. It's also alone on chr1, so it
         # has no reference-CNEE neighbor on either flank at all -- under v2's
@@ -408,7 +405,6 @@ class WorkflowTests(unittest.TestCase):
         # keeping the solid chrQ2 projection as a lone one2one.
         self.assertEqual(result.query_bed_count, 0)
         self.assertEqual(result.summary_count, 3)
-        self.assertEqual(result.strict_summary_count, 3)
         self.assertEqual(result.orthology_result.orthology_rows, 3)
         self.assertEqual(result.orthology_result.culled_projection_rows, 2)
         # 2 synteny candidates (weak + lost; CNEE_PARTIAL no longer has a
@@ -416,9 +412,7 @@ class WorkflowTests(unittest.TestCase):
         # flank sizes (10000, 1000, 100).
         self.assertEqual(result.synteny_result.rows, 6)
         self.assertEqual(len(stats_rows), 3)
-        self.assertEqual(len(strict_stats_rows), 1)
         self.assertEqual(len(summary_rows), 3)
-        self.assertEqual(len(strict_summary_rows), 3)
         self.assertEqual(len(orthology_rows), 3)
         self.assertEqual(len(synteny_rows), 6)
         self.assertEqual(
@@ -439,13 +433,6 @@ class WorkflowTests(unittest.TestCase):
         }
         self.assertEqual(summary_statuses["CNEE_GAPPED"], "lost")
         self.assertEqual(summary_statuses["CNEE_NO_CHAIN"], "missing")
-        strict_summary_by_id = {
-            row["cnee_uid"]: row for row in strict_summary_rows
-        }
-        self.assertEqual(
-            strict_summary_by_id["CNEE_PARTIAL"]["num_query_alignments"], "1"
-        )
-        self.assertEqual(strict_summary_by_id["CNEE_PARTIAL"]["projection_status"], "aligned")
         synteny_statuses = {row["orthology_status"] for row in synteny_rows}
         self.assertEqual(synteny_statuses, {"weak", "lost"})
         self.assertEqual(

@@ -218,6 +218,20 @@ class TwoBitAccessor:
     Unlike FASTA, .2bit is natively indexed (the format's own header stores
     per-sequence offsets and N-run/mask-run tables), so there's no sidecar
     index file to build or cache -- opening the file is enough.
+
+    Biopython's own per-call lookup (Bio.Seq's lazy .2bit sequence data)
+    calls numpy.fromfile fresh on every single fetch(), which profiles at
+    ~35-40x slower per call than FastaAccessor's plain seek()/read() even in
+    the best case, and far worse under the scattered access pattern this
+    pipeline actually produces (confirmed: a real ~600k-chain run went from
+    ~2 minutes with FASTA to ~4 hours of CPU time with .2bit). Fully
+    decoding a whole chromosome at once, by contrast, runs at ~1.1-1.3 GB/s
+    with no sign of superlinear cost at any size tested (a 196Mbp chromosome
+    decodes in ~0.15s) -- so each sequence is decoded to a plain str at most
+    once, on first access, and every fetch after that is a cheap string
+    slice. Worth the memory (up to one full genome's worth of plain-str
+    sequence, decoded lazily per chromosome so untouched scaffolds cost
+    nothing) for the several-orders-of-magnitude speedup.
     """
 
     def __init__(self, twobit_path: str | Path) -> None:
@@ -233,19 +247,28 @@ class TwoBitAccessor:
         self._iterator = TwoBitIterator(str(self.twobit_path))
         self.sequences = self._iterator.sequences
         self.aliases = _build_aliases(self.sequences.keys())
+        self._decoded: dict[str, str] = {}
+
+    def _decoded_sequence(self, resolved: str) -> str:
+        text = self._decoded.get(resolved)
+        if text is None:
+            text = str(self.sequences[resolved]).upper()
+            self._decoded[resolved] = text
+        return text
 
     def fetch(self, seq_id: str, start: int, end: int) -> str:
         resolved = self.aliases.get(seq_id)
         if resolved is None:
             raise KeyError(f"Sequence {seq_id!r} was not found in {self.twobit_path}")
-        seq = self.sequences[resolved]
-        if start < 0 or end < start or end > len(seq):
+        text = self._decoded_sequence(resolved)
+        if start < 0 or end < start or end > len(text):
             raise ValueError(
-                f"Invalid interval {seq_id}:{start}-{end} for sequence length {len(seq)}"
+                f"Invalid interval {seq_id}:{start}-{end} for sequence length {len(text)}"
             )
-        return str(seq[start:end]).upper()
+        return text[start:end]
 
     def close(self) -> None:
+        self._decoded.clear()
         self._iterator.stream.close()
 
 

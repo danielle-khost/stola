@@ -40,20 +40,12 @@ def _run(args: argparse.Namespace) -> None:
     )
     print(f"Indexed {result.chain_count} chains")
     print(f"Wrote {result.stats_count} all overlap-stat rows -> {result.stats_path}")
-    print(
-        f"Wrote {result.strict_stats_count} strict overlap-stat rows -> "
-        f"{result.strict_stats_path}"
-    )
     print(f"Wrote {result.query_bed_count} query CNEE BED rows -> {result.query_bed_path}")
     print(
         f"Wrote {result.orthology_result.orthology_rows} query orthology rows -> "
         f"{result.orthology_path}"
     )
     print(f"Wrote {result.summary_count} all CNEE summary rows -> {result.summary_path}")
-    print(
-        f"Wrote {result.strict_summary_count} strict CNEE summary rows -> "
-        f"{result.strict_summary_path}"
-    )
     print(
         f"Wrote {result.synteny_result.rows} synteny verification rows -> "
         f"{result.synteny_path}"

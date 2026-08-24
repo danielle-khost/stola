@@ -22,11 +22,11 @@ for every candidate, and writes
 every output under `--outdir` (default: the current directory) using a fixed
 set of filenames -- see `dev_docs/output_files.md` for the full list, e.g.
 `overlap_stats.tsv`, `query_cnees.bed`, `query_ortho_status.tsv`,
-`ref_ortho_status.tsv`, `pruned_query_projections.tsv`, and the `.strict`
-companion outputs. Intermediate index/candidate files are kept under
-`<outdir>/work/`. Diagnostic figures are generated separately from completed
-outputs. Use `--query-prefix` to change the prefix on graph-assigned query
-CNEE ids (default `q_`, e.g. `q_ce1234`).
+`ref_ortho_status.tsv`, and `pruned_query_projections.tsv`. Intermediate
+index/candidate files, plus the exploratory synteny reports (see below), are
+kept under `<outdir>/work/`. Diagnostic figures are generated separately from
+completed outputs. Use `--query-prefix` to change the prefix on
+graph-assigned query CNEE ids (default `q_`, e.g. `q_ce1234`).
 
 The reference BED and chain file must use exactly the same chromosome/contig
 naming convention -- there is no accession-version alias fallback. A BED
@@ -44,10 +44,9 @@ must be met by the same projection --
 metrics are never blended across the multiple projections that can share one
 ref/query edge, so an edge is solid only if at least one of its projections
 passes both checks on its own. Tune these with `--max-fraction-gap` and
-`--min-sequence-identity`. All output keeps every aligned query projection for
-a reference CNEE that has at least one solid projection. Strict output keeps
-only solid projections; references with weak aligned projections but no solid
-projection are retained as `uncertain_loss` in both modes. Categories are
+`--min-sequence-identity`. Output keeps every aligned query projection for a
+reference CNEE that has at least one solid projection; references with weak
+aligned projections but no solid one are retained as `uncertain_loss`. Categories are
 `one2one`, `one2many`, `many2one`, `lost`, `unaligned`, `uncertain_loss`, or the
 catch-all `complex/many2many`. The query orthology TSV (`query_ortho_status.tsv`)
 has three columns: `query_cnee_id`, `partner_ref_cnees`, and
@@ -65,7 +64,8 @@ as does parsing a BED with zero-length intervals (which can never overlap a
 chain and always end up `missing`).
 
 The workflow also writes an exploratory flanking-synteny verification table at
-`overlap_stats.synteny.tsv`. This table reports weak all-mode projections,
+`work/overlap_stats.synteny.tsv` -- diagnostic output, not one of the main
+outputs listed above. This table reports weak all-mode projections,
 `lost` and `uncertain_loss` candidates, and a capped sample of `one2one`
 positive controls. It is long-format: each candidate gets one row per
 requested flank size, with columns `cnee_uid`, `orthology_status`,
@@ -83,7 +83,8 @@ the reference bases upstream/downstream checked at each scale, and
 candidates, default `50000`.
 
 A second, complementary synteny check is written to
-`overlap_stats.synteny_neighbors.tsv`. Where the table above compares raw
+`work/overlap_stats.synteny_neighbors.tsv` (also diagnostic, not main output).
+Where the table above compares raw
 flanking sequence, this one is purely positional: for the same candidates
 (weak, lost, uncertain_loss, one2one controls), it asks whether the query
 region corresponding to the candidate is still flanked by the *same*
@@ -116,8 +117,8 @@ candidates) a position interpolated from the chain blocks immediately
 flanking the candidate's gap. `synteny_matches` is `TRUE`/`FALSE` when the
 query neighbor is/isn't one of the reference neighbor's orthology partners,
 or `.` when either neighbor can't be resolved (chromosome/chain edge, or no
-query CNEE nearby). It's always written to `overlap_stats.synteny_neighbors.tsv`
-under `--outdir`; it reuses `--synteny-max-one2one-controls`,
+query CNEE nearby). It's always written to
+`work/overlap_stats.synteny_neighbors.tsv`; it reuses `--synteny-max-one2one-controls`,
 `--min-sequence-identity`, and `--max-fraction-gap` and needs no ref/query
 FASTA itself, since it does no sequence comparison.
 

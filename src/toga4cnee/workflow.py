@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -18,7 +17,7 @@ from .orthology import (
     OrthologyResult,
     classify_orthology,
 )
-from .overlap import OVERLAP_COLUMNS, write_overlap_stats
+from .overlap import write_overlap_stats
 from .sequence_compare import SequenceComparator
 from .synteny import (
     DEFAULT_FLANK_SIZES,
@@ -26,15 +25,15 @@ from .synteny import (
     write_synteny_neighbor_verification,
     write_synteny_verification,
 )
-from .summary import stats_row_is_solid, summarize_overlap_stats
+from .summary import summarize_overlap_stats
 
 # Fixed output layout under --outdir -- see output_files.md. Not individually
-# overridable; --outdir is the only output-location knob the CLI exposes.
+# overridable; --outdir is the only output-location knob the CLI exposes. The
+# synteny reports are exploratory/diagnostic, not main output, so they live
+# under work/ alongside the other intermediates rather than in outdir itself.
 QUERY_BED_FILENAME = "query_cnees.bed"
 STATS_FILENAME = "overlap_stats.tsv"
 SUMMARY_FILENAME = "overlap_stats.summary.tsv"
-STRICT_STATS_FILENAME = "overlap_stats.strict.tsv"
-STRICT_SUMMARY_FILENAME = "overlap_stats.strict.summary.tsv"
 SYNTENY_FILENAME = "overlap_stats.synteny.tsv"
 SYNTENY_NEIGHBORS_FILENAME = "overlap_stats.synteny_neighbors.tsv"
 QUERY_ORTHOLOGY_FILENAME = "query_ortho_status.tsv"
@@ -48,10 +47,8 @@ class WorkflowResult:
     chain_count: int
     candidate_count: int
     stats_count: int
-    strict_stats_count: int
     query_bed_count: int
     summary_count: int
-    strict_summary_count: int
     orthology_result: OrthologyResult
     synteny_result: SyntenyResult
     synteny_neighbor_result: SyntenyResult
@@ -61,8 +58,6 @@ class WorkflowResult:
     query_bed_path: Path
     stats_path: Path
     summary_path: Path
-    strict_stats_path: Path
-    strict_summary_path: Path
     synteny_path: Path
     synteny_neighbors_path: Path
     orthology_path: Path
@@ -101,10 +96,8 @@ def run_workflow(
     out_bed = outdir_path / QUERY_BED_FILENAME
     out_stats = outdir_path / STATS_FILENAME
     out_summary = outdir_path / SUMMARY_FILENAME
-    out_strict_stats = outdir_path / STRICT_STATS_FILENAME
-    out_strict_summary = outdir_path / STRICT_SUMMARY_FILENAME
-    out_synteny = outdir_path / SYNTENY_FILENAME
-    out_synteny_neighbors = outdir_path / SYNTENY_NEIGHBORS_FILENAME
+    out_synteny = work_dir / SYNTENY_FILENAME
+    out_synteny_neighbors = work_dir / SYNTENY_NEIGHBORS_FILENAME
     out_orthology = outdir_path / QUERY_ORTHOLOGY_FILENAME
     out_culled_projections = outdir_path / PRUNED_PROJECTIONS_FILENAME
     out_ref_cnees = outdir_path / REF_ORTHOLOGY_FILENAME
@@ -173,20 +166,6 @@ def run_workflow(
             min_sequence_identity=min_sequence_identity,
             max_fraction_gap=max_fraction_gap,
         )
-        strict_stats_count = _write_strict_stats(
-            out_stats,
-            out_strict_stats,
-            min_sequence_identity=min_sequence_identity,
-            max_fraction_gap=max_fraction_gap,
-        )
-        strict_summary_count = summarize_overlap_stats(
-            out_stats,
-            out_strict_summary,
-            cnee_bed=cnee_bed,
-            solid_only=True,
-            min_sequence_identity=min_sequence_identity,
-            max_fraction_gap=max_fraction_gap,
-        )
     finally:
         sequence_comparator.close()
 
@@ -194,10 +173,8 @@ def run_workflow(
         chain_count=int(index_payload["chain_count"]),
         candidate_count=candidate_count,
         stats_count=stats_count,
-        strict_stats_count=strict_stats_count,
         query_bed_count=orthology_result.query_bed_rows,
         summary_count=summary_count,
-        strict_summary_count=strict_summary_count,
         orthology_result=orthology_result,
         synteny_result=synteny_result,
         synteny_neighbor_result=synteny_neighbor_result,
@@ -207,41 +184,9 @@ def run_workflow(
         query_bed_path=out_bed,
         stats_path=out_stats,
         summary_path=out_summary,
-        strict_stats_path=out_strict_stats,
-        strict_summary_path=out_strict_summary,
         synteny_path=out_synteny,
         synteny_neighbors_path=out_synteny_neighbors,
         orthology_path=out_orthology,
         culled_projections_path=out_culled_projections,
         ref_cnees_path=out_ref_cnees,
     )
-
-
-def _write_strict_stats(
-    stats_path: Path,
-    out_stats: Path,
-    min_sequence_identity: float,
-    max_fraction_gap: float,
-) -> int:
-    # Write a filtered overlap-stats TSV containing only solid candidate rows.
-    count = 0
-    with stats_path.open("r", encoding="utf-8", newline="") as in_handle:
-        reader = csv.DictReader(in_handle, delimiter="\t")
-        with out_stats.open("w", encoding="utf-8", newline="") as out_handle:
-            writer = csv.DictWriter(
-                out_handle,
-                fieldnames=reader.fieldnames or OVERLAP_COLUMNS,
-                delimiter="\t",
-                lineterminator="\n",
-            )
-            writer.writeheader()
-            for row in reader:
-                if not stats_row_is_solid(
-                    row,
-                    min_sequence_identity=min_sequence_identity,
-                    max_fraction_gap=max_fraction_gap,
-                ):
-                    continue
-                writer.writerow(row)
-                count += 1
-    return count
