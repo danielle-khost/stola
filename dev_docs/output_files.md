@@ -15,6 +15,11 @@ indexes) live under `<outdir>/work/`.
 - `ref_ortho_status.tsv` -- TSV ref CNEEs
   - ref ID, ref orthology category, number projections (final), number pruned projections, pre-pruning ref orthology category
 - `pruned_query_projections.tsv` -- per-projection log of synteny-verification prunes
+- `<cnee_bed_stem>_named.bed` -- only written when the input reference CNEE
+  BED had no name column; a BED4 copy naming each row with the cnee_uid the
+  pipeline synthesized for it, so the same ids can be recognized across
+  separate runs of the same reference BED (e.g. against different query
+  species)
 
 ## "Development output"
 Exploratory/diagnostic output, not considered main pipeline output -- lives

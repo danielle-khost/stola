@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .bed import bed_missing_name_column, parse_bed, write_named_bed
 from .candidates import write_candidates
 from .index import build_index
 from .orthology import (
@@ -40,6 +42,7 @@ QUERY_ORTHOLOGY_FILENAME = "query_ortho_status.tsv"
 PRUNED_PROJECTIONS_FILENAME = "pruned_query_projections.tsv"
 REF_ORTHOLOGY_FILENAME = "ref_ortho_status.tsv"
 WORK_DIRNAME = "work"
+NAMED_BED_SUFFIX = "_named.bed"
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,7 @@ class WorkflowResult:
     orthology_path: Path
     culled_projections_path: Path
     ref_cnees_path: Path
+    named_ref_bed_path: Path | None
 
 
 def run_workflow(
@@ -104,6 +108,20 @@ def run_workflow(
 
     index_path = work_dir / "chain_index.json"
     candidates_path = work_dir / "candidate_chains.tsv"
+
+    named_ref_bed_path: Path | None = None
+    if bed_missing_name_column(cnee_bed):
+        # The reference BED lacked a name column, so parse_bed synthesized
+        # coordinate-based ids for it. Those ids are already stable across
+        # runs on this same file, but write them out so users can see them
+        # and compare them directly across separate query runs.
+        named_ref_bed_path = outdir_path / f"{Path(cnee_bed).stem}{NAMED_BED_SUFFIX}"
+        with warnings.catch_warnings():
+            # parse_bed's duplicate/zero-length warnings already fire from
+            # the downstream steps below; avoid emitting them twice here.
+            warnings.simplefilter("ignore")
+            named_intervals = parse_bed(cnee_bed)
+        write_named_bed(named_intervals, named_ref_bed_path)
 
     index_payload = build_index(chain_file, index_path)
     candidate_count = write_candidates(index_path, cnee_bed, candidates_path)
@@ -189,4 +207,5 @@ def run_workflow(
         orthology_path=out_orthology,
         culled_projections_path=out_culled_projections,
         ref_cnees_path=out_ref_cnees,
+        named_ref_bed_path=named_ref_bed_path,
     )

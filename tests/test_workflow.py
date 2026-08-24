@@ -451,6 +451,53 @@ class WorkflowTests(unittest.TestCase):
             if row["orthology_status"] == "lost":
                 self.assertEqual(row["distance_to_nearest_aligned_block"], "25")
 
+    def test_workflow_leaves_named_ref_bed_path_none_when_input_bed_has_names(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
+
+            result = run_workflow(chain, bed, ref_fasta, query_fasta, outdir=tmp_path)
+
+        self.assertIsNone(result.named_ref_bed_path)
+        self.assertEqual(list(tmp_path.glob("*_named.bed")), [])
+
+    def test_workflow_writes_named_ref_bed_when_input_bed_lacks_name_column(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, _ = _write_inputs(tmp_path)
+            bed = tmp_path / "cnees.bed"
+            bed.write_text(
+                "\n".join(
+                    [
+                        "chr1\t120\t240",
+                        "chr2\t175\t225",
+                        "chr3\t10\t20",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                result = run_workflow(chain, bed, ref_fasta, query_fasta, outdir=tmp_path)
+
+        self.assertEqual(result.named_ref_bed_path, tmp_path / "cnees_named.bed")
+        self.assertEqual(
+            result.named_ref_bed_path.read_text(encoding="utf-8").splitlines(),
+            [
+                "chr1\t120\t240\tcnee_000001_chr1_120_240",
+                "chr2\t175\t225\tcnee_000002_chr2_175_225",
+                "chr3\t10\t20\tcnee_000003_chr3_10_20",
+            ],
+        )
+
     def test_orthology_graph_edges_store_per_projection_metrics_and_require_single_projection_solid(
         self,
     ) -> None:
@@ -733,6 +780,56 @@ class WorkflowTests(unittest.TestCase):
         query_ids = {row["query_cnee_id"] for row in rows}
         self.assertEqual(query_ids, {"cust_CNEE_A"})
         self.assertEqual(bed_lines, ["chrQ\t100\t150\tcust_CNEE_A\t0\t+"])
+
+    def test_classify_orthology_appends_missing_underscore_to_query_id_prefix(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from toga4cnee.orthology import classify_orthology
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bed = tmp_path / "cnees.bed"
+            stats = tmp_path / "stats.tsv"
+            orthology = tmp_path / "orthology.tsv"
+            query_bed = tmp_path / "query.bed"
+            bed.write_text("chr1\t0\t50\tCNEE_A\n", encoding="utf-8")
+            stats.write_text(
+                "\t".join(
+                    [
+                        "cnee_uid",
+                        "ref_chrom",
+                        "ref_start",
+                        "ref_end",
+                        "chain_id",
+                        "aligned_bases",
+                        "query_chrom",
+                        "query_strand",
+                        "query_aligned_start",
+                        "query_aligned_end",
+                        "query_projection_name",
+                        "gap_fraction_within_chain_span",
+                        "seq_identity",
+                        "rank_by_chain_score",
+                    ]
+                )
+                + "\n"
+                + "CNEE_A\tchr1\t0\t50\t1\t50\tchrQ\t+\t100\t150\tA#1\t0.05\t0.8\t1\n",
+                encoding="utf-8",
+            )
+
+            classify_orthology(
+                stats,
+                bed,
+                tmp_path / "unused_index.json",
+                orthology,
+                query_bed,
+                synteny_check=False,
+                query_id_prefix="aphWoo",
+            )
+            rows = _read_tsv(orthology)
+
+        query_ids = {row["query_cnee_id"] for row in rows}
+        self.assertEqual(query_ids, {"aphWoo_CNEE_A"})
 
     def test_synteny_verification_v2_promotes_syntenic_weak_call_and_culls_mismatched_one(
         self,

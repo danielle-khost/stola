@@ -39,6 +39,11 @@ def _run(args: argparse.Namespace) -> None:
         min_gap_length=args.min_gap_length,
     )
     print(f"Indexed {result.chain_count} chains")
+    if result.named_ref_bed_path is not None:
+        print(
+            "Reference BED had no name column; wrote generated CNEE ids -> "
+            f"{result.named_ref_bed_path}"
+        )
     print(f"Wrote {result.stats_count} all overlap-stat rows -> {result.stats_path}")
     print(f"Wrote {result.query_bed_count} query CNEE BED rows -> {result.query_bed_path}")
     print(
@@ -134,7 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=DEFAULT_QUERY_ID_PREFIX,
         help=(
-            "Prefix for every graph-assigned query CNEE id, e.g. 'q_ce1234' "
+            "Prefix for every graph-assigned query CNEE id, e.g. 'q_ce1234'. "
+            "A trailing '_' is added automatically if not already present, "
+            "so 'aphWoo' and 'aphWoo_' both give ids like 'aphWoo_ce1234' "
             f"[default: {DEFAULT_QUERY_ID_PREFIX!r}]"
         ),
     )

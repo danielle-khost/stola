@@ -9,7 +9,7 @@ description = "TOGA-like projection workflow components for conserved nonexonic 
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "TOGA4CNEE developers" }]
-dependencies = ["biopython>=1.87", "networkx>=3.0"]
+dependencies = ["biopython>=1.80", "networkx>=3.0"]
 
 [project.optional-dependencies]
 viz = ["matplotlib>=3.7"]

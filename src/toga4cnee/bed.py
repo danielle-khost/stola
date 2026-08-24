@@ -82,6 +82,46 @@ def parse_bed(path: str | Path) -> list[BedInterval]:
     return intervals
 
 
+def bed_missing_name_column(path: str | Path) -> bool:
+    """Report whether any row of a BED file lacks a usable column 4.
+
+    parse_bed synthesizes a coordinate-based cnee_id for such rows, which
+    stays stable across separate pipeline runs on the same reference BED, but
+    is otherwise invisible to the user -- callers use this to decide whether
+    to write out the synthesized names as a companion "_named.bed" file.
+    """
+    with Path(path).open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            fields = line.split("\t")
+            if len(fields) < 4 or not fields[3]:
+                return True
+    return False
+
+
+def write_named_bed(intervals: list[BedInterval], out_path: str | Path) -> int:
+    """Write reference CNEEs as BED4, naming each row with its cnee_uid.
+
+    Used to hand the user a stable, named copy of a reference BED that
+    lacked a name column, so that the same synthesized ids can be recognized
+    across separate runs (e.g. the same reference CNEEs lifted to different
+    query species).
+    """
+    count = 0
+    with Path(out_path).open("w", encoding="utf-8") as handle:
+        for interval in sorted(intervals, key=lambda item: item.line_number):
+            handle.write(
+                "\t".join(
+                    [interval.chrom, str(interval.start), str(interval.end), interval.cnee_uid]
+                )
+                + "\n"
+            )
+            count += 1
+    return count
+
+
 def group_bed_by_chrom(intervals: list[BedInterval]) -> dict[str, list[BedInterval]]:
     # Group and sort CNEEs by reference chromosome for interval scanning.
     grouped: dict[str, list[BedInterval]] = defaultdict(list)

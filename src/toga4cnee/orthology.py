@@ -208,12 +208,16 @@ def classify_orthology(
     "lost"/"unaligned" labels are unaffected either way.
 
     Every graph-assigned query CNEE id is prefixed with query_id_prefix
-    (default "q_", e.g. "q_ce1234").
+    (default "q_", e.g. "q_ce1234"). A trailing "_" is appended automatically
+    if query_id_prefix doesn't already end with one, so "aphWoo" and
+    "aphWoo_" both produce ids like "aphWoo_ce1234".
     """
     if min_sequence_identity < 0 or min_sequence_identity > 1:
         raise ValueError("min_sequence_identity must be between 0 and 1")
     if max_fraction_gap < 0 or max_fraction_gap > 1:
         raise ValueError("max_fraction_gap must be between 0 and 1")
+    if query_id_prefix and not query_id_prefix.endswith("_"):
+        query_id_prefix = f"{query_id_prefix}_"
     try:
         import networkx as nx
     except ImportError as exc:
