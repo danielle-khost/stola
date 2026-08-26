@@ -74,8 +74,33 @@ Be sure that the naming conventions match between the chain, BED and genome file
 
 `overlap_stats_summary.tsv`: summary of `overlap_stats.tsv` with lists for each ref CNEE of number of projections (i.e. overlaps), fraction overlapping aligned bases (and number of gaps), sequence identity vs query (and number of mismatches)
 
+## Analysis
+### Utility scripts
+*scripts/compare_cross_orthology.py*: collects orthology info across multiple runs of the same reference against different queries, and outputs FASTA file of shared one2one orthologs (true by default; disable this behavior with the flag `--no-fasta`).
 
-## Summary figures
+Useage:
+```
+python scripts/compare_cross_orthology.py \\
+    --query-dirs run_dirs.txt \\
+    --ref-bed reference_cnees.bed \\
+    --ref-prefix dummyRef \\
+    --ref-genome path/to/ref.fasta|2bit \\
+    --out-dir .
+```
+
+The `run_dirs.txt` file should be a list of full paths to output directories from multiple runs, one directory per line. 
+
+If outputting one2one orthologs, include the argument `--ref-genome` with the path to the reference 2bit/FASTA genome. Also, in the `run_dirs.txt` file add a second column (tab separated) for each sample with a path to the query 2bit/FASTA genome. This will generate one FASTA file for each ortholog set, which are output to subdirectories contained in `one2one_ortholog_fasta/`.
+
+You may optionally include a third column (tab separated) with a species prefix to use for that sample; otherwise, the script will attempt to use the query prefix present in the output files from that run. Example:
+
+```
+out/dummyRef_vs_queryA  path/to/queryA.fasta|2bit  sppA
+out/dummyRef_vs_queryB  path/to/queryB.fasta|2bit
+out/dummyRef_vs_queryC  path/to/queryC.fasta|2bit sppC
+```
+
+### Summary figures
 
 Create the summary from an existing stats file:
 
