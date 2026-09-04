@@ -24,3 +24,8 @@ dummy*
 *.pif.*
 .DS_Store
 *.2bit
+*.gtf
+*.gff
+exploratory_analysis/
+*.gz
+*.txt
