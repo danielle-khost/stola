@@ -161,6 +161,7 @@ def write_orthology_category_counts(
 
 def write_alignment_histogram(summary_path: str | Path, out_path: str | Path) -> int:
     # Plot the distribution of query-alignment counts per reference CNEE.
+    csv.field_size_limit(max(csv.field_size_limit(), 10_000_000))
     labels = [str(i) for i in range(11)] + [">10"]
     counts = [0 for _ in labels]
     total = 0
