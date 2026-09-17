@@ -5,42 +5,7 @@ Takes a list of `toga4cnee run` output directories -- the same reference BED
 lifted to different query species -- and builds one combined TSV where each
 row is a reference CNEE and each column is a query species' final
 orthology_category for that CNEE, read from each directory's
-ref_ortho_status.tsv (see dev_docs/compare_cross_orthology.md).
-
-Each run's column label is chosen in order of preference:
-  1. A manual label given as an optional third, tab-separated column in
-     --query-dirs (one "outdir<TAB>genome<TAB>label" line per run).
-  2. Otherwise, the query_id_prefix baked into that run's
-     query_ortho_status.tsv's query_cnee_id values (the text before the
-     first "_") -- unless that comes out as "q", the pipeline's generic
-     default prefix and uninformative across runs, or the file has no
-     usable (non-"NA") query id at all.
-  3. Otherwise, that output directory's own folder name.
-
-By default (disable with --no-fasta), also extracts a FASTA of orthologous
-sequences for every reference CNEE that is one2one in *every* listed run:
-one combined "<ref_cnee_id>_orthologs.fasta" per such CNEE (reference
-sequence plus each sample's query ortholog), written under
-<out-dir>/one2one_ortholog_fasta/batchN/ in batches of 10000 files, so a
-large CNEE set doesn't dump hundreds of thousands of files into one
-directory. This needs --ref-genome plus a genome path in --query-dirs'
-second column for every run, and reuses each run's own byte-offset FASTA
-index (<outdir>/work/query_fasta.idx) built by the original `toga4cnee run`
-rather than re-indexing -- so point the genome column at the exact same
-FASTA/2bit path that run was originally given.
-
-Example:
-    PYTHONPATH=src python scripts/compare_cross_orthology.py \\
-        --query-dirs query_dirs.txt \\
-        --ref-bed dummyRef.cnees.bed \\
-        --ref-genome dummyRef.fasta \\
-        --ref-prefix dummyRef \\
-        --out-dir .
-
-Where query_dirs.txt looks like:
-    out/dummyRef_vs_sppA   genomes/sppA.2bit       sppA
-    out/dummyRef_vs_sppB   genomes/sppB.fasta
-    out/dummyRef_vs_sppC   genomes/sppC.2bit       sppC
+ref_ortho_status.tsv 
 """
 
 from __future__ import annotations
@@ -266,14 +231,42 @@ def extract_one2one_orthologs(
     ref_fasta: str | Path,
     ref_prefix: str,
     out_dir: Path,
+    min_length: int,
+    max_seqs: int,
 ) -> tuple[int, int]:
     """Write one <ref_cnee_id>_orthologs.fasta per ref CNEE that's one2one
-    in every column. Returns (written_count, skipped_count)."""
+    in every column, at least min_length bp long (by its reference interval,
+    not any query projection), and within the first max_seqs such CNEEs in
+    ref_ids order. Either bound can be set to 0 to disable it. Returns
+    (written_count, skipped_count)."""
     all_one2one = [
         ref_id for ref_id in ref_ids if all(col.category_by_ref.get(ref_id) == "one2one" for col in columns)
     ]
     if not all_one2one:
         return 0, 0
+
+    if min_length > 0:
+        too_short = [
+            ref_id for ref_id in all_one2one
+            if (ref_coords_by_id[ref_id][2] - ref_coords_by_id[ref_id][1]) < min_length
+        ]
+        if too_short:
+            print(
+                f"Dropping {len(too_short)} ref CNEE(s) shorter than --min-length {min_length}",
+                file=sys.stderr,
+            )
+            too_short_set = set(too_short)
+            all_one2one = [ref_id for ref_id in all_one2one if ref_id not in too_short_set]
+        if not all_one2one:
+            return 0, 0
+
+    if max_seqs > 0 and len(all_one2one) > max_seqs:
+        print(
+            f"{len(all_one2one)} ref CNEE(s) pass length filtering; capping at --max-seqs "
+            f"{max_seqs} (dropping {len(all_one2one) - max_seqs})",
+            file=sys.stderr,
+        )
+        all_one2one = all_one2one[:max_seqs]
 
     print(
         f"{len(all_one2one)} ref CNEE(s) are one2one in every sample; extracting FASTA...",
@@ -393,6 +386,25 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Only write the combined orthology TSV; skip one2one FASTA extraction",
     )
+    parser.add_argument(
+        "--min-length",
+        type=int,
+        default=40,
+        help=(
+            "Minimum reference CNEE length (bp) to include in FASTA extraction, "
+            "decided by the reference interval's own length; 0 disables this filter "
+            "[default: 40]"
+        ),
+    )
+    parser.add_argument(
+        "--max-seqs",
+        type=int,
+        default=100000,
+        help=(
+            "Maximum number of one2one ortholog FASTA files to write; 0 disables this cap "
+            "[default: 100000]"
+        ),
+    )
     args = parser.parse_args(argv)
 
     fasta_enabled = not args.no_fasta
@@ -427,7 +439,8 @@ def main(argv: list[str] | None = None) -> None:
     if fasta_enabled:
         ref_coords_by_id = {interval.cnee_uid: (interval.chrom, interval.start, interval.end) for interval in ref_intervals}
         written, skipped = extract_one2one_orthologs(
-            ref_ids, ref_coords_by_id, columns, args.ref_genome, args.ref_prefix, args.out_dir
+            ref_ids, ref_coords_by_id, columns, args.ref_genome, args.ref_prefix, args.out_dir,
+            args.min_length, args.max_seqs,
         )
         skip_note = f" ({skipped} skipped)" if skipped else ""
         print(
