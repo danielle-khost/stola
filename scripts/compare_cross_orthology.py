@@ -233,21 +233,40 @@ def extract_one2one_orthologs(
     out_dir: Path,
     min_length: int,
     max_seqs: int,
+    ortho_frac: float,
 ) -> tuple[int, int]:
     """Write one <ref_cnee_id>_orthologs.fasta per ref CNEE that's one2one
-    in every column, at least min_length bp long (by its reference interval,
-    not any query projection), and within the first max_seqs such CNEEs in
-    ref_ids order. Either bound can be set to 0 to disable it. Returns
-    (written_count, skipped_count)."""
-    all_one2one = [
-        ref_id for ref_id in ref_ids if all(col.category_by_ref.get(ref_id) == "one2one" for col in columns)
+    in at least ortho_frac of columns, at least min_length bp long (by its
+    reference interval, not any query projection), and within the first
+    max_seqs such CNEEs in ref_ids order. min_length/max_seqs can be set to
+    0 to disable that bound. A qualifying CNEE's file has the reference
+    sequence plus one record per column where it's actually one2one --
+    columns where it isn't are simply omitted, not treated as a failure.
+
+    Processes one query genome (column) at a time -- fetch every sequence
+    that column contributes, then close its accessor before opening the
+    next -- rather than holding every column's genome accessor open at
+    once. This matters for .2bit query genomes: TwoBitAccessor decodes and
+    caches a full chromosome in memory the first time anything on it is
+    fetched (see its docstring), so holding all columns open simultaneously
+    means up to len(columns) genomes' worth of decoded sequence resident at
+    once -- for hundreds of samples that can far exceed available RAM. One
+    genome open at a time bounds that to a single genome regardless of how
+    many columns there are. Returns (written_count, hard_failed_count) --
+    the latter counts CNEEs dropped entirely because a column claimed
+    one2one but its query sequence couldn't actually be located/fetched, a
+    data-consistency problem distinct from "not one2one in that column"."""
+    n_columns = len(columns)
+    qualifying_refs = [
+        ref_id for ref_id in ref_ids
+        if sum(1 for col in columns if col.category_by_ref.get(ref_id) == "one2one") / n_columns >= ortho_frac
     ]
-    if not all_one2one:
+    if not qualifying_refs:
         return 0, 0
 
     if min_length > 0:
         too_short = [
-            ref_id for ref_id in all_one2one
+            ref_id for ref_id in qualifying_refs
             if (ref_coords_by_id[ref_id][2] - ref_coords_by_id[ref_id][1]) < min_length
         ]
         if too_short:
@@ -256,94 +275,130 @@ def extract_one2one_orthologs(
                 file=sys.stderr,
             )
             too_short_set = set(too_short)
-            all_one2one = [ref_id for ref_id in all_one2one if ref_id not in too_short_set]
-        if not all_one2one:
+            qualifying_refs = [ref_id for ref_id in qualifying_refs if ref_id not in too_short_set]
+        if not qualifying_refs:
             return 0, 0
 
-    if max_seqs > 0 and len(all_one2one) > max_seqs:
+    if max_seqs > 0 and len(qualifying_refs) > max_seqs:
         print(
-            f"{len(all_one2one)} ref CNEE(s) pass length filtering; capping at --max-seqs "
-            f"{max_seqs} (dropping {len(all_one2one) - max_seqs})",
+            f"{len(qualifying_refs)} ref CNEE(s) pass length filtering; capping at --max-seqs "
+            f"{max_seqs} (dropping {len(qualifying_refs) - max_seqs})",
             file=sys.stderr,
         )
-        all_one2one = all_one2one[:max_seqs]
+        qualifying_refs = qualifying_refs[:max_seqs]
 
     print(
-        f"{len(all_one2one)} ref CNEE(s) are one2one in every sample; extracting FASTA...",
+        f"{len(qualifying_refs)} ref CNEE(s) are one2one in >= {ortho_frac:.0%} of "
+        f"{n_columns} sample(s); extracting FASTA...",
         file=sys.stderr,
     )
 
-    # Restrict each run's query_cnees.bed lookup to only the ids we need --
-    # that file can be huge, but the wanted set is known up front.
-    coords_by_column = []
-    for col in columns:
-        wanted_ids = {col.one2one_map[ref_id] for ref_id in all_one2one if ref_id in col.one2one_map}
-        coords_by_column.append(_read_query_bed_coords(col.run_dir / QUERY_BED_FILENAME, wanted_ids))
-
-    # Reuse each run's own pipeline-built index instead of re-indexing.
-    ref_work_dir = columns[0].run_dir / WORK_DIRNAME
-    ref_work_dir.mkdir(parents=True, exist_ok=True)
-    ref_accessor = open_genome_accessor(ref_fasta, ref_work_dir / "ref_fasta.idx")
-    query_accessors = []
-    for col in columns:
-        work_dir = col.run_dir / WORK_DIRNAME
-        work_dir.mkdir(parents=True, exist_ok=True)
-        query_accessors.append(open_genome_accessor(col.genome_path, work_dir / "query_fasta.idx"))
-
     from Bio.Seq import Seq
 
-    fasta_root = out_dir / FASTA_SUBDIR_NAME
-    written = 0
-    skipped = 0
+    # Pass 1: fetch every reference sequence up front (one genome, opened
+    # and closed before any query genome is touched), seeding one record
+    # list per surviving ref CNEE.
+    ref_work_dir = columns[0].run_dir / WORK_DIRNAME
+    ref_work_dir.mkdir(parents=True, exist_ok=True)
+    records_by_ref: dict[str, list[tuple[str, str]]] = {}
+    failed_refs: set[str] = set()
+    ref_accessor = open_genome_accessor(ref_fasta, ref_work_dir / "ref_fasta.idx")
     try:
-        for index, ref_id in enumerate(all_one2one):
-            if index and index % 50000 == 0:
-                print(f"  ...{index}/{len(all_one2one)} processed", file=sys.stderr)
-
+        for ref_id in qualifying_refs:
             ref_chrom, ref_start, ref_end = ref_coords_by_id[ref_id]
             try:
                 ref_seq = ref_accessor.fetch(ref_chrom, ref_start, ref_end).upper()
             except (KeyError, ValueError) as exc:
                 print(f"warning: skipping {ref_id} (reference fetch failed: {exc})", file=sys.stderr)
-                skipped += 1
+                failed_refs.add(ref_id)
                 continue
+            records_by_ref[ref_id] = [(f"{ref_prefix} {ref_id} {ref_chrom}:{ref_start}-{ref_end}", ref_seq)]
+    finally:
+        ref_accessor.close()
 
-            records = [(f"{ref_prefix} {ref_id} {ref_chrom}:{ref_start}-{ref_end}", ref_seq)]
-            ok = True
-            for col, coords, accessor in zip(columns, coords_by_column, query_accessors):
+    # Pass 2: one query genome at a time. A column where a ref CNEE isn't
+    # one2one is skipped silently (that's an expected, per-sample omission,
+    # not a failure). A ref CNEE that hard-fails at column K -- one2one per
+    # category_by_ref, but its query sequence can't be found/fetched -- is
+    # marked failed and skipped (without a further warning) by every later
+    # column, matching the original per-ref "stop at the first failure"
+    # behavior, just reached via a flag instead of an inner-loop break,
+    # since columns are now the outer loop.
+    omitted = 0
+    for col_index, col in enumerate(columns, start=1):
+        # Restrict this run's query_cnees.bed lookup to only the ids we
+        # still need -- that file can be huge, but the wanted set is known.
+        wanted_ids = {
+            col.one2one_map[ref_id]
+            for ref_id in qualifying_refs
+            if ref_id not in failed_refs
+            and col.category_by_ref.get(ref_id) == "one2one"
+            and ref_id in col.one2one_map
+        }
+        coords = _read_query_bed_coords(col.run_dir / QUERY_BED_FILENAME, wanted_ids)
+
+        work_dir = col.run_dir / WORK_DIRNAME
+        work_dir.mkdir(parents=True, exist_ok=True)
+        accessor = open_genome_accessor(col.genome_path, work_dir / "query_fasta.idx")
+        try:
+            for ref_id in qualifying_refs:
+                if ref_id in failed_refs:
+                    continue
+                if col.category_by_ref.get(ref_id) != "one2one":
+                    omitted += 1
+                    continue
                 query_id = col.one2one_map.get(ref_id)
                 if query_id is None or query_id not in coords:
                     print(
-                        f"warning: skipping {ref_id} ({col.label} has no query BED coordinates "
-                        "for its one2one ortholog)",
+                        f"warning: skipping {ref_id} ({col.label} claims one2one but has no "
+                        "query BED coordinates for its ortholog)",
                         file=sys.stderr,
                     )
-                    ok = False
-                    break
+                    failed_refs.add(ref_id)
+                    records_by_ref.pop(ref_id, None)
+                    continue
                 chrom, start, end, strand = coords[query_id]
                 try:
                     seq = accessor.fetch(chrom, start, end)
                 except (KeyError, ValueError) as exc:
                     print(f"warning: skipping {ref_id} ({col.label} fetch failed: {exc})", file=sys.stderr)
-                    ok = False
-                    break
+                    failed_refs.add(ref_id)
+                    records_by_ref.pop(ref_id, None)
+                    continue
                 if strand == "-":
                     seq = str(Seq(seq).reverse_complement())
-                records.append((f"{col.label} {query_id} {chrom}:{start}-{end}({strand})", seq.upper()))
-            if not ok:
-                skipped += 1
-                continue
-
-            batch_dir = fasta_root / f"batch{index // FASTA_BATCH_SIZE + 1}"
-            batch_dir.mkdir(parents=True, exist_ok=True)
-            _write_fasta_records(records, batch_dir / f"{_sanitize_filename(ref_id)}_orthologs.fasta")
-            written += 1
-    finally:
-        ref_accessor.close()
-        for accessor in query_accessors:
+                records_by_ref[ref_id].append(
+                    (f"{col.label} {query_id} {chrom}:{start}-{end}({strand})", seq.upper())
+                )
+        finally:
+            # Closing releases this column's genome from memory (for a
+            # .2bit accessor, its decoded-chromosome cache) before the next
+            # column's genome is opened.
             accessor.close()
 
-    return written, skipped
+        if col_index % 50 == 0 or col_index == len(columns):
+            print(f"  ...{col_index}/{len(columns)} samples processed", file=sys.stderr)
+
+    if omitted:
+        print(
+            f"Omitted {omitted} per-sample sequence(s) from CNEEs that weren't one2one in "
+            "that particular sample",
+            file=sys.stderr,
+        )
+
+    # Pass 3: write out every ref CNEE that didn't hard-fail, batched by its
+    # position in qualifying_refs (unchanged by which ones failed).
+    fasta_root = out_dir / FASTA_SUBDIR_NAME
+    written = 0
+    for index, ref_id in enumerate(qualifying_refs):
+        if ref_id in failed_refs:
+            continue
+        batch_dir = fasta_root / f"batch{index // FASTA_BATCH_SIZE + 1}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        _write_fasta_records(records_by_ref[ref_id], batch_dir / f"{_sanitize_filename(ref_id)}_orthologs.fasta")
+        written += 1
+
+    return written, len(failed_refs)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -405,11 +460,23 @@ def main(argv: list[str] | None = None) -> None:
             "[default: 100000]"
         ),
     )
+    parser.add_argument(
+        "--ortho-frac",
+        type=float,
+        default=0.9,
+        help=(
+            "Minimum fraction of samples a ref CNEE must be one2one in to be included in "
+            "FASTA extraction; samples where it isn't one2one simply have no sequence in "
+            "its output file. 1.0 requires one2one in every sample [default: 0.9]"
+        ),
+    )
     args = parser.parse_args(argv)
 
     fasta_enabled = not args.no_fasta
     if fasta_enabled and args.ref_genome is None:
         raise SystemExit("--ref-genome is required unless --no-fasta is given")
+    if not 0.0 <= args.ortho_frac <= 1.0:
+        raise SystemExit(f"--ortho-frac must be between 0 and 1 (got {args.ortho_frac})")
 
     run_dirs = _read_run_dirs(args.query_dirs)
     if not run_dirs:
@@ -440,7 +507,7 @@ def main(argv: list[str] | None = None) -> None:
         ref_coords_by_id = {interval.cnee_uid: (interval.chrom, interval.start, interval.end) for interval in ref_intervals}
         written, skipped = extract_one2one_orthologs(
             ref_ids, ref_coords_by_id, columns, args.ref_genome, args.ref_prefix, args.out_dir,
-            args.min_length, args.max_seqs,
+            args.min_length, args.max_seqs, args.ortho_frac,
         )
         skip_note = f" ({skipped} skipped)" if skipped else ""
         print(
