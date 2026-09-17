@@ -237,8 +237,18 @@ def extract_one2one_orthologs(
     """Write one <ref_cnee_id>_orthologs.fasta per ref CNEE that's one2one
     in every column, at least min_length bp long (by its reference interval,
     not any query projection), and within the first max_seqs such CNEEs in
-    ref_ids order. Either bound can be set to 0 to disable it. Returns
-    (written_count, skipped_count)."""
+    ref_ids order. Either bound can be set to 0 to disable it.
+
+    Processes one query genome (column) at a time -- fetch every sequence
+    that column contributes, then close its accessor before opening the
+    next -- rather than holding every column's genome accessor open at
+    once. This matters for .2bit query genomes: TwoBitAccessor decodes and
+    caches a full chromosome in memory the first time anything on it is
+    fetched (see its docstring), so holding all columns open simultaneously
+    means up to len(columns) genomes' worth of decoded sequence resident at
+    once -- for hundreds of samples that can far exceed available RAM. One
+    genome open at a time bounds that to a single genome regardless of how
+    many columns there are. Returns (written_count, skipped_count)."""
     all_one2one = [
         ref_id for ref_id in ref_ids if all(col.category_by_ref.get(ref_id) == "one2one" for col in columns)
     ]
@@ -273,44 +283,51 @@ def extract_one2one_orthologs(
         file=sys.stderr,
     )
 
-    # Restrict each run's query_cnees.bed lookup to only the ids we need --
-    # that file can be huge, but the wanted set is known up front.
-    coords_by_column = []
-    for col in columns:
-        wanted_ids = {col.one2one_map[ref_id] for ref_id in all_one2one if ref_id in col.one2one_map}
-        coords_by_column.append(_read_query_bed_coords(col.run_dir / QUERY_BED_FILENAME, wanted_ids))
-
-    # Reuse each run's own pipeline-built index instead of re-indexing.
-    ref_work_dir = columns[0].run_dir / WORK_DIRNAME
-    ref_work_dir.mkdir(parents=True, exist_ok=True)
-    ref_accessor = open_genome_accessor(ref_fasta, ref_work_dir / "ref_fasta.idx")
-    query_accessors = []
-    for col in columns:
-        work_dir = col.run_dir / WORK_DIRNAME
-        work_dir.mkdir(parents=True, exist_ok=True)
-        query_accessors.append(open_genome_accessor(col.genome_path, work_dir / "query_fasta.idx"))
-
     from Bio.Seq import Seq
 
-    fasta_root = out_dir / FASTA_SUBDIR_NAME
-    written = 0
-    skipped = 0
+    # Pass 1: fetch every reference sequence up front (one genome, opened
+    # and closed before any query genome is touched), seeding one record
+    # list per surviving ref CNEE.
+    ref_work_dir = columns[0].run_dir / WORK_DIRNAME
+    ref_work_dir.mkdir(parents=True, exist_ok=True)
+    records_by_ref: dict[str, list[tuple[str, str]]] = {}
+    failed_refs: set[str] = set()
+    ref_accessor = open_genome_accessor(ref_fasta, ref_work_dir / "ref_fasta.idx")
     try:
-        for index, ref_id in enumerate(all_one2one):
-            if index and index % 50000 == 0:
-                print(f"  ...{index}/{len(all_one2one)} processed", file=sys.stderr)
-
+        for ref_id in all_one2one:
             ref_chrom, ref_start, ref_end = ref_coords_by_id[ref_id]
             try:
                 ref_seq = ref_accessor.fetch(ref_chrom, ref_start, ref_end).upper()
             except (KeyError, ValueError) as exc:
                 print(f"warning: skipping {ref_id} (reference fetch failed: {exc})", file=sys.stderr)
-                skipped += 1
+                failed_refs.add(ref_id)
                 continue
+            records_by_ref[ref_id] = [(f"{ref_prefix} {ref_id} {ref_chrom}:{ref_start}-{ref_end}", ref_seq)]
+    finally:
+        ref_accessor.close()
 
-            records = [(f"{ref_prefix} {ref_id} {ref_chrom}:{ref_start}-{ref_end}", ref_seq)]
-            ok = True
-            for col, coords, accessor in zip(columns, coords_by_column, query_accessors):
+    # Pass 2: one query genome at a time. A ref CNEE that fails at column K
+    # is marked failed and skipped (without a warning) by every later
+    # column, matching the original per-ref "stop at the first failure"
+    # behavior -- just reached via a flag instead of an inner-loop break,
+    # since columns are now the outer loop.
+    for col_index, col in enumerate(columns, start=1):
+        # Restrict this run's query_cnees.bed lookup to only the ids we
+        # still need -- that file can be huge, but the wanted set is known.
+        wanted_ids = {
+            col.one2one_map[ref_id]
+            for ref_id in all_one2one
+            if ref_id not in failed_refs and ref_id in col.one2one_map
+        }
+        coords = _read_query_bed_coords(col.run_dir / QUERY_BED_FILENAME, wanted_ids)
+
+        work_dir = col.run_dir / WORK_DIRNAME
+        work_dir.mkdir(parents=True, exist_ok=True)
+        accessor = open_genome_accessor(col.genome_path, work_dir / "query_fasta.idx")
+        try:
+            for ref_id in all_one2one:
+                if ref_id in failed_refs:
+                    continue
                 query_id = col.one2one_map.get(ref_id)
                 if query_id is None or query_id not in coords:
                     print(
@@ -318,32 +335,44 @@ def extract_one2one_orthologs(
                         "for its one2one ortholog)",
                         file=sys.stderr,
                     )
-                    ok = False
-                    break
+                    failed_refs.add(ref_id)
+                    records_by_ref.pop(ref_id, None)
+                    continue
                 chrom, start, end, strand = coords[query_id]
                 try:
                     seq = accessor.fetch(chrom, start, end)
                 except (KeyError, ValueError) as exc:
                     print(f"warning: skipping {ref_id} ({col.label} fetch failed: {exc})", file=sys.stderr)
-                    ok = False
-                    break
+                    failed_refs.add(ref_id)
+                    records_by_ref.pop(ref_id, None)
+                    continue
                 if strand == "-":
                     seq = str(Seq(seq).reverse_complement())
-                records.append((f"{col.label} {query_id} {chrom}:{start}-{end}({strand})", seq.upper()))
-            if not ok:
-                skipped += 1
-                continue
-
-            batch_dir = fasta_root / f"batch{index // FASTA_BATCH_SIZE + 1}"
-            batch_dir.mkdir(parents=True, exist_ok=True)
-            _write_fasta_records(records, batch_dir / f"{_sanitize_filename(ref_id)}_orthologs.fasta")
-            written += 1
-    finally:
-        ref_accessor.close()
-        for accessor in query_accessors:
+                records_by_ref[ref_id].append(
+                    (f"{col.label} {query_id} {chrom}:{start}-{end}({strand})", seq.upper())
+                )
+        finally:
+            # Closing releases this column's genome from memory (for a
+            # .2bit accessor, its decoded-chromosome cache) before the next
+            # column's genome is opened.
             accessor.close()
 
-    return written, skipped
+        if col_index % 50 == 0 or col_index == len(columns):
+            print(f"  ...{col_index}/{len(columns)} samples processed", file=sys.stderr)
+
+    # Pass 3: write out every ref CNEE that survived every column, batched
+    # by its position in all_one2one (unchanged by which ones failed).
+    fasta_root = out_dir / FASTA_SUBDIR_NAME
+    written = 0
+    for index, ref_id in enumerate(all_one2one):
+        if ref_id in failed_refs:
+            continue
+        batch_dir = fasta_root / f"batch{index // FASTA_BATCH_SIZE + 1}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        _write_fasta_records(records_by_ref[ref_id], batch_dir / f"{_sanitize_filename(ref_id)}_orthologs.fasta")
+        written += 1
+
+    return written, len(failed_refs)
 
 
 def main(argv: list[str] | None = None) -> None:
