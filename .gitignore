@@ -29,3 +29,6 @@ dummy*
 exploratory_analysis/
 *.gz
 *.txt
+model_training/
+*.axt
+*.maf
