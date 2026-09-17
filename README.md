@@ -87,12 +87,14 @@ python scripts/compare_cross_orthology.py \\
     --ref-genome path/to/ref.fasta|2bit \\
     --min-length 40 \\
     --max-seqs 100000 \\
+    --ortho-frac 0.9
     --out-dir .
 ```
 
 The `run_dirs.txt` file should be a list of full paths to output directories from multiple runs, one directory per line. 
 
-If outputting one2one orthologs, include the argument `--ref-genome` with the path to the reference 2bit/FASTA genome. Also, in the `run_dirs.txt` file add a second column (tab separated) for each sample with a path to the query 2bit/FASTA genome. This will generate one FASTA file for each ortholog set, which are output to subdirectories contained in `one2one_ortholog_fasta/`. By default it outputs only CNEEs >40bp (`--min-length`) and a maximum of 100000 individual CNEE FASTA files (`--max-seqs`). Set either of these two parameters to `0` to disable filtering and/or output all shared orthologs. 
+If outputting one2one orthologs, include the argument `--ref-genome` with the path to the reference 2bit/FASTA genome. Also, in the `run_dirs.txt` file add a second column (tab separated) for each sample with a path to the query 2bit/FASTA genome. This will generate one FASTA file for each ortholog set, which are output to subdirectories contained in `one2one_ortholog_fasta/`. A given CNEE must be one2one in at least 90% of samples in order to be output; you can tune this using the `--ortho-frac` parameter.
+By default the script outputs only CNEEs >40bp (`--min-length`) and a maximum of 100000 individual CNEE FASTA files (`--max-seqs`). Set either of these two parameters to `0` to disable filtering and/or output all shared orthologs. 
 
 You may optionally include a third column (tab separated) with a species prefix to use for that sample; otherwise, the script will attempt to use the query prefix present in the output files from that run. Example:
 
