@@ -14,7 +14,7 @@ import argparse
 import csv
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -41,7 +41,15 @@ class RunColumn:
     category_by_ref: dict[str, str]
     run_dir: Path
     genome_path: Path | None
-    one2one_map: dict[str, str] = field(default_factory=dict)  # ref_cnee_id -> query_cnee_id
+    # one2one_map (ref_cnee_id -> query_cnee_id) is intentionally NOT a field
+    # here -- it's read fresh from QUERY_ORTHOLOGY_FILENAME on demand, one
+    # column at a time, inside extract_one2one_orthologs's Pass 2, instead of
+    # being pre-loaded for every column up front. That file can have order-
+    # 10^5 one2one rows per sample; loading and keeping all of them for
+    # hundreds of samples at once (holding all their one2one_maps in memory
+    # simultaneously, most of them long before that column's turn in Pass 2)
+    # is what actually exhausted memory on real multi-hundred-sample runs --
+    # far more than the genome-accessor memory this module already guards.
 
 
 def _read_run_dirs(list_path: str | Path) -> list[tuple[Path, Path | None, str | None]]:
@@ -160,22 +168,18 @@ def collect_cross_run_orthology(
             print(f"warning: skipping {run_dir} (missing {REF_ORTHOLOGY_FILENAME})", file=sys.stderr)
             continue
 
-        one2one_map: dict[str, str] = {}
-        if build_fasta_data:
-            # FASTA mode needs this file's actual data (not just a peek), so
-            # a manual label can no longer substitute for its absence.
-            if not query_orthology_path.is_file():
-                print(
-                    f"warning: skipping {run_dir} (missing {QUERY_ORTHOLOGY_FILENAME}, "
-                    "needed to locate one2one query orthologs for FASTA extraction)",
-                    file=sys.stderr,
-                )
-                continue
-            peeked_label, one2one_map = _read_query_orthology_file(query_orthology_path, True)
-            label = manual_label or (
-                peeked_label if peeked_label and peeked_label != GENERIC_LABEL else run_dir.resolve().name
+        if build_fasta_data and not query_orthology_path.is_file():
+            # FASTA mode needs this file later (its one2one_map is read on
+            # demand per column during extraction, not here), so a manual
+            # label can no longer substitute for its absence.
+            print(
+                f"warning: skipping {run_dir} (missing {QUERY_ORTHOLOGY_FILENAME}, "
+                "needed to locate one2one query orthologs for FASTA extraction)",
+                file=sys.stderr,
             )
-        elif manual_label is not None:
+            continue
+
+        if manual_label is not None:
             label = manual_label
         elif query_orthology_path.is_file():
             peeked_label, _ = _read_query_orthology_file(query_orthology_path, False)
@@ -198,7 +202,6 @@ def collect_cross_run_orthology(
                 category_by_ref=_read_ref_orthology(ref_orthology_path),
                 run_dir=run_dir,
                 genome_path=genome_path,
-                one2one_map=one2one_map,
             )
         )
 
@@ -239,23 +242,28 @@ def extract_one2one_orthologs(
     in at least ortho_frac of columns, at least min_length bp long (by its
     reference interval, not any query projection), and within the first
     max_seqs such CNEEs in ref_ids order. min_length/max_seqs can be set to
-    0 to disable that bound. A qualifying CNEE's file has the reference
-    sequence plus one record per column where it's actually one2one --
-    columns where it isn't are simply omitted, not treated as a failure.
+    0 to disable that bound. A qualifying CNEE's file always has the same
+    N+1 records -- the reference sequence plus exactly one per column, in
+    column order -- so every file lists the same set of species regardless
+    of which ones were actually one2one for that CNEE. A column where it
+    isn't one2one gets an all-N placeholder record (same length as the
+    reference CNEE) instead of a real sequence, not a failure and not an
+    omission.
 
-    Processes one query genome (column) at a time -- fetch every sequence
-    that column contributes, then close its accessor before opening the
-    next -- rather than holding every column's genome accessor open at
-    once. This matters for .2bit query genomes: TwoBitAccessor decodes and
-    caches a full chromosome in memory the first time anything on it is
-    fetched (see its docstring), so holding all columns open simultaneously
-    means up to len(columns) genomes' worth of decoded sequence resident at
-    once -- for hundreds of samples that can far exceed available RAM. One
-    genome open at a time bounds that to a single genome regardless of how
-    many columns there are. Returns (written_count, hard_failed_count) --
-    the latter counts CNEEs dropped entirely because a column claimed
-    one2one but its query sequence couldn't actually be located/fetched, a
-    data-consistency problem distinct from "not one2one in that column"."""
+    Processes one column at a time -- its one2one_map (ref->query id, read
+    fresh from QUERY_ORTHOLOGY_FILENAME) and its genome accessor are both
+    loaded right before that column's turn and released before the next
+    column's -- rather than holding every column's data resident at once.
+    This matters at real scale for two independent reasons: a .2bit query
+    genome's TwoBitAccessor decodes and caches a full chromosome in memory
+    the first time anything on it is fetched (see its docstring), and a
+    one2one_map can have order-10^5 entries per sample -- either one, held
+    for every column simultaneously instead of one at a time, can add up to
+    far more memory than a single genome or map, for hundreds of samples.
+    Returns (written_count, hard_failed_count) -- the latter counts CNEEs
+    dropped entirely because a column claimed one2one but its query
+    sequence couldn't actually be located/fetched, a data-consistency
+    problem distinct from "not one2one in that column"."""
     n_columns = len(columns)
     qualifying_refs = [
         ref_id for ref_id in ref_ids
@@ -317,23 +325,30 @@ def extract_one2one_orthologs(
         ref_accessor.close()
 
     # Pass 2: one query genome at a time. A column where a ref CNEE isn't
-    # one2one is skipped silently (that's an expected, per-sample omission,
-    # not a failure). A ref CNEE that hard-fails at column K -- one2one per
-    # category_by_ref, but its query sequence can't be found/fetched -- is
-    # marked failed and skipped (without a further warning) by every later
-    # column, matching the original per-ref "stop at the first failure"
-    # behavior, just reached via a flag instead of an inner-loop break,
-    # since columns are now the outer loop.
-    omitted = 0
+    # one2one gets an all-N placeholder record instead of a real sequence
+    # (expected, not a failure), so every output file keeps the same
+    # species in the same order regardless of which ones matched. A ref
+    # CNEE that hard-fails at column K -- one2one per category_by_ref, but
+    # its query sequence can't be found/fetched -- is marked failed and
+    # skipped (without a further warning) by every later column, matching
+    # the original per-ref "stop at the first failure" behavior, just
+    # reached via a flag instead of an inner-loop break, since columns are
+    # now the outer loop.
+    n_placeholder = 0
     for col_index, col in enumerate(columns, start=1):
+        # Read on demand rather than upfront in collect_cross_run_orthology
+        # -- see RunColumn's comment -- and let it go out of scope (freed)
+        # once this column's iteration ends, same as the genome accessor.
+        _, one2one_map = _read_query_orthology_file(col.run_dir / QUERY_ORTHOLOGY_FILENAME, True)
+
         # Restrict this run's query_cnees.bed lookup to only the ids we
         # still need -- that file can be huge, but the wanted set is known.
         wanted_ids = {
-            col.one2one_map[ref_id]
+            one2one_map[ref_id]
             for ref_id in qualifying_refs
             if ref_id not in failed_refs
             and col.category_by_ref.get(ref_id) == "one2one"
-            and ref_id in col.one2one_map
+            and ref_id in one2one_map
         }
         coords = _read_query_bed_coords(col.run_dir / QUERY_BED_FILENAME, wanted_ids)
 
@@ -345,9 +360,11 @@ def extract_one2one_orthologs(
                 if ref_id in failed_refs:
                     continue
                 if col.category_by_ref.get(ref_id) != "one2one":
-                    omitted += 1
+                    n_placeholder += 1
+                    ref_start, ref_end = ref_coords_by_id[ref_id][1], ref_coords_by_id[ref_id][2]
+                    records_by_ref[ref_id].append((f"{col.label} NA NA", "N" * (ref_end - ref_start)))
                     continue
-                query_id = col.one2one_map.get(ref_id)
+                query_id = one2one_map.get(ref_id)
                 if query_id is None or query_id not in coords:
                     print(
                         f"warning: skipping {ref_id} ({col.label} claims one2one but has no "
@@ -379,10 +396,10 @@ def extract_one2one_orthologs(
         if col_index % 50 == 0 or col_index == len(columns):
             print(f"  ...{col_index}/{len(columns)} samples processed", file=sys.stderr)
 
-    if omitted:
+    if n_placeholder:
         print(
-            f"Omitted {omitted} per-sample sequence(s) from CNEEs that weren't one2one in "
-            "that particular sample",
+            f"Filled {n_placeholder} per-sample sequence(s) with an all-N placeholder "
+            "for samples that weren't one2one for that CNEE",
             file=sys.stderr,
         )
 
