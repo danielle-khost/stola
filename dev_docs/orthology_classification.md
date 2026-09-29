@@ -2,8 +2,26 @@
 For each candidate projection to query, give it a query ID and classify it into different orthology relation categories between each reference and query CNEEs
 
 # Filtering criteria
-Overlap fraction, sequence similarity, number of projections for the CNEE
-- provides an "identity threshold" 
+A lone ref/query edge (a ref CNEE with exactly one candidate projection, to a
+query locus no other ref CNEE also lands on) is never filtered -- it is
+always reported as one2one, with its own sequence_identity/gap_fraction
+exposed as output columns (see Output) rather than gated on them, so
+filtering can happen post-hoc if desired.
+
+Anything with more than one candidate projection -- one2many, many2one, or
+complex/many2many by initial graph shape -- goes through per-projection
+depth/score filtering: see `spurious_hit_filtering.md` for the full
+algorithm (`toga4cnee.spurious_filter`, wired into
+`toga4cnee.orthology.classify_orthology` as `filter_multi_projections`).
+Briefly, per candidate projection at its own query-side locus:
+- `locus_depth` (1 + # other chains genome-wide overlapping that locus) at
+  or above a threshold (default 20) rejects it outright as repeat-driven.
+- `locus_depth == 1` (no competing chain at all) accepts it only if its
+  surrounding flanks have real aligned-block coverage from ANY chain.
+- Otherwise, its own arithmetic alignment score at the locus core is
+  compared against every competing chain's, normalized by the locus's best
+  score; a clear winner/loser resolves immediately, a close call falls back
+  to comparing flank scores instead.
 
 # Orthology categories:
 ## Ref CNEE categories
@@ -22,7 +40,7 @@ Overlap fraction, sequence similarity, number of projections for the CNEE
 - one2many: single copy in ref, multicopy in query; query projections pass filtering criteria
 - many2one: multiple ref CNEEs align to same query locus; ref alignments pass filtering criteria
 - complex: complex cases where multiple ref CNEEs overlap multiple the same query loci
-- pruned: query projection fails verification filter
+- pruned: query projection fails depth/score filtering
 
 ## Loss sub-categorization (implemented)
 Whether a chain gap is a contig boundary is inferred from the query FASTA
@@ -43,8 +61,8 @@ see `assembly_gaps.py`. Three outcomes:
   `missing/loss` even when the genome's overall convention is confident.
 
 This sub-categorization (plus per-ref pruning counts and pre-pruning
-category) is independent of synteny verification and always runs when a
-query FASTA is supplied, written to the ref-CNEE TSV described in
+category) is independent of multi-projection filtering and always runs when
+a query FASTA is supplied, written to the ref-CNEE TSV described in
 output_files.md. It does not change out_orthology's own "lost"/"unaligned"
 labels.
 
@@ -55,20 +73,25 @@ labels.
   - Store edge attributes:
     - sequence_identity
     - fraction_gap
-  - A "solid" edge passes the current filtering thresholds
-- for each query node:
+- Determine each ref CNEE's initial (pre-filtering) graph shape from its
+  connected component: a lone ref/query edge needs no filtering at all; a
+  ref with multiple query edges, multiple refs sharing one query edge, or a
+  larger many-to-many component are all "multi-projection" and go through
+  the depth/score filtering described above (see Filtering criteria) before
+  the graph is re-clustered from the surviving projections.
+- for each query node (in the post-filtering graph):
   - get connected ref nodes
   - use info re: connected nodes to assign orthology category and ID for that query node (i.e CNEE):
-    - if query node has at least 1 solid edge:
-      - if connected to single ref node that has no other connections, then: "one2one"
-        - set query ID as "q_[ref CNEE name]"
-      - if connected single ref node and:
-        - ref node connects multiple query nodes AND those query nodes only connect this reference
-        - then: "one2many"
-          - set query ID as "q_[ref DNEE name]_[n]"
-      - if connects to multiple ref nodes and those ref nodes only connect this query node, then: "many2one"
-      - for now, if none of these criteria met, then: "complex"
-    - else if query node only has non-solid edge(s), then: "uncertain_loss"
+    - if connected to single ref node that has no other connections, then: "one2one"
+      - set query ID as "q_[ref CNEE name]"
+    - if connected single ref node and:
+      - ref node connects multiple query nodes AND those query nodes only connect this reference
+      - then: "one2many"
+        - set query ID as "q_[ref DNEE name]_[n]"
+    - if connects to multiple ref nodes and those ref nodes only connect this query node, then: "many2one"
+    - for now, if none of these criteria met, then: "complex"
+  - a ref left with no surviving query edge at all (but that did have some
+    projection before filtering) becomes "uncertain_loss"
 - for each reference node with 0 chain-overlap candidates:
   - set query CNEE ID to "NA"
   - set orthology category as: "missing"
@@ -108,7 +131,13 @@ M -- "Yes" --> N["one2many"]
 M -- "No" --> L
 ```
 
-# Orthology flowchart v2
+# Orthology flowchart v3
+Per-projection depth/score filtering (see Filtering criteria and
+`spurious_hit_filtering.md`) runs on every ref CNEE in an ambiguous
+(one2many/many2one/complex) component before the graph is re-clustered and
+final categories are assigned from the surviving edges; a lone ref/query
+edge is never filtered.
+
 ```mermaid
 flowchart TD
 
@@ -116,16 +145,16 @@ A["For each ref CNEE"] --> B{"Does it overlap a chain?"}
 B -- "No" --> C["Missing"]
 B -- "Yes" --> D{"Does it have aligned query bases?"}
 D -- "No" --> E["Lost"]
-D -- "Yes" --> F{"Does it have exactly 1 query projection?"}
+D -- "Yes" --> F{"Exactly 1 query projection pre-filtering?"}
 F -- "Yes" --> G{"Does the 1 query match other refs?"}
-G -- "No" --> H{"Is it a solid projection?"}
-H -- "Yes" --> H1["one2one"]
-H -- "No" --> H2["one2one(weak)"]
-G -- "Yes" --> I{"Do those other refs match other queries?"}
+G -- "No" --> H1["one2one"]
+G -- "Yes" --> I{"Filter, then: do surviving other refs match other queries?"}
+I -- "No surviving edges at all" --> O["Uncertain Loss"]
 I -- "No" --> I1["many2one"]
 I -- "Yes" --> I2["complex"]
-F -- "No" --> J["Do all the multiple queries match only this ref?"]
+F -- "No" --> J["Filter, then: do all surviving queries match only this ref?"]
+J -- "No surviving edges at all" --> O
 J -- "No" --> I2
-J -- "Yes" --> K["one2many"]
-
+J -- "Yes, more than one survives" --> K["one2many"]
+J -- "Yes, exactly one survives" --> H1
 ```

@@ -7,11 +7,16 @@ import sys
 from pathlib import Path
 
 from .orthology import (
-    DEFAULT_MIN_ALIGN_SCORE,
+    DEFAULT_CNEE_R_THRESHOLD,
+    DEFAULT_DEPTH_FILTER_MAX,
+    DEFAULT_EXTEND_GAP_SCORE,
+    DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
+    DEFAULT_FLANK_WINDOW,
+    DEFAULT_MATCH_SCORE,
     DEFAULT_MIN_GAP_LENGTH,
-    DEFAULT_MIN_NEIGHBOR_FRACTION,
+    DEFAULT_MISMATCH_SCORE,
+    DEFAULT_OPEN_GAP_SCORE,
     DEFAULT_QUERY_ID_PREFIX,
-    DEFAULT_VERIFICATION_NUM_NEIGHBORS,
 )
 from .plots import write_qc_plots
 from .summary import summarize_overlap_stats
@@ -32,10 +37,15 @@ def _run(args: argparse.Namespace) -> None:
         synteny_max_one2one_controls=args.synteny_max_one2one_controls,
         min_sequence_identity=args.min_sequence_identity,
         max_fraction_gap=args.max_fraction_gap,
-        synteny_check=not args.no_synteny_check,
-        min_align_score=args.min_align_score,
-        min_neighbor_fraction=args.min_neighbor_fraction,
-        verification_num_neighbors=args.verification_num_neighbors,
+        filter_multi_projections=not args.no_filter_multi_projections,
+        depth_filter_max=args.depth_filter_max,
+        cnee_r_threshold=args.cnee_r_threshold,
+        flank_window=args.flank_window,
+        flank_any_coverage_threshold=args.flank_any_coverage_threshold,
+        match_score=args.match_score,
+        mismatch_score=args.mismatch_score,
+        open_gap_score=args.open_gap_score,
+        extend_gap_score=args.extend_gap_score,
         min_gap_length=args.min_gap_length,
     )
     print(f"Indexed {result.chain_count} chains")
@@ -166,52 +176,97 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-sequence-identity",
         type=float,
         default=0.7,
-        help="Minimum sequence identity for a solid orthology edge [default: 0.7]",
+        help=(
+            "Minimum sequence identity for a 'solid' candidate in the synteny "
+            "diagnostic reports and the overlap-stats summary (does not gate "
+            "orthology categorization) [default: 0.7]"
+        ),
     )
     run_parser.add_argument(
         "--max-fraction-gap",
         type=float,
         default=0.1,
-        help="Maximum gap fraction for a solid orthology edge [default: 0.1]",
+        help=(
+            "Maximum gap fraction for a 'solid' candidate in the synteny "
+            "diagnostic reports and the overlap-stats summary (does not gate "
+            "orthology categorization) [default: 0.1]"
+        ),
     )
     run_parser.add_argument(
-        "--no-synteny-check",
+        "--no-filter-multi-projections",
         action="store_true",
         help=(
-            "Skip synteny verification/pruning of ambiguous orthology edges "
-            "(a non-solid single ref/query edge, or any edge in a one2many/"
-            "many2one/complex component). Categories are still assigned from "
-            "the unpruned graph, just without the extra quality gate."
+            "Skip depth/score filtering of multi-projection orthology edges "
+            "(any edge in a one2many/many2one/complex component). A lone "
+            "ref/query edge is never filtered either way. Categories are "
+            "still assigned from the unfiltered graph, just without the "
+            "extra quality gate."
         ),
     )
     run_parser.add_argument(
-        "--min-align-score",
-        type=float,
-        default=DEFAULT_MIN_ALIGN_SCORE,
-        help=(
-            "Minimum align_score (this projection's sequence identity relative "
-            f"to the best in its connected component) to survive synteny "
-            f"verification [default: {DEFAULT_MIN_ALIGN_SCORE}]"
-        ),
-    )
-    run_parser.add_argument(
-        "--min-neighbor-fraction",
-        type=float,
-        default=DEFAULT_MIN_NEIGHBOR_FRACTION,
-        help=(
-            "Minimum fraction of trusted neighboring reference CNEEs whose own "
-            "query ortholog corroborates this projection's synteny, to survive "
-            f"verification [default: {DEFAULT_MIN_NEIGHBOR_FRACTION}]"
-        ),
-    )
-    run_parser.add_argument(
-        "--verification-num-neighbors",
+        "--depth-filter-max",
         type=int,
-        default=DEFAULT_VERIFICATION_NUM_NEIGHBORS,
+        default=DEFAULT_DEPTH_FILTER_MAX,
         help=(
-            "Number of trusted (solid one2one) reference-CNEE neighbors checked "
-            f"per flank during synteny verification [default: {DEFAULT_VERIFICATION_NUM_NEIGHBORS}]"
+            "Reject a candidate projection outright if its query locus has "
+            "this many or more chains (genome-wide) overlapping it -- reads "
+            f"as a repeat-driven pileup [default: {DEFAULT_DEPTH_FILTER_MAX}]"
         ),
+    )
+    run_parser.add_argument(
+        "--cnee-r-threshold",
+        type=float,
+        default=DEFAULT_CNEE_R_THRESHOLD,
+        help=(
+            "R = this candidate's own-locus score / the best score (this "
+            "candidate or any competitor) at that locus. R below this value "
+            "rejects outright; this candidate at R=1 with every competitor "
+            "below this value accepts outright; anything else falls back to "
+            f"a flank-score tiebreak [default: {DEFAULT_CNEE_R_THRESHOLD}]"
+        ),
+    )
+    run_parser.add_argument(
+        "--flank-window",
+        type=int,
+        default=DEFAULT_FLANK_WINDOW,
+        help=(
+            "Query-side flank size (bases each side) used both for the "
+            f"depth/competitor search and the flank-score tiebreak [default: {DEFAULT_FLANK_WINDOW}]"
+        ),
+    )
+    run_parser.add_argument(
+        "--flank-any-coverage-threshold",
+        type=float,
+        default=DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
+        help=(
+            "For a candidate with no competing chain at all (locus_depth == 1): "
+            "minimum fraction of its flanks that must have aligned-block "
+            f"coverage from ANY chain to accept it [default: {DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD}]"
+        ),
+    )
+    run_parser.add_argument(
+        "--match-score",
+        type=float,
+        default=DEFAULT_MATCH_SCORE,
+        help=f"Per-base match score for the depth/score filter's arithmetic alignment score [default: {DEFAULT_MATCH_SCORE}]",
+    )
+    run_parser.add_argument(
+        "--mismatch-score",
+        type=float,
+        default=DEFAULT_MISMATCH_SCORE,
+        help=f"Per-base mismatch score for the depth/score filter's arithmetic alignment score [default: {DEFAULT_MISMATCH_SCORE}]",
+    )
+    run_parser.add_argument(
+        "--open-gap-score",
+        type=float,
+        default=DEFAULT_OPEN_GAP_SCORE,
+        help=f"Gap-open score for the depth/score filter's arithmetic alignment score [default: {DEFAULT_OPEN_GAP_SCORE}]",
+    )
+    run_parser.add_argument(
+        "--extend-gap-score",
+        type=float,
+        default=DEFAULT_EXTEND_GAP_SCORE,
+        help=f"Gap-extend score for the depth/score filter's arithmetic alignment score [default: {DEFAULT_EXTEND_GAP_SCORE}]",
     )
     run_parser.add_argument(
         "--min-gap-length",

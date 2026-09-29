@@ -1,4 +1,4 @@
-"""Graph-based CNEE orthology classification with synteny-verified pruning."""
+"""Graph-based CNEE orthology classification with depth/score filtering."""
 
 from __future__ import annotations
 
@@ -12,14 +12,30 @@ from .assembly_gaps import DEFAULT_MIN_GAP_LENGTH, NRunIndex, scan_query_assembl
 from .bed import parse_bed
 from .chain import iter_chain_blocks
 from .index import load_index
+from .models import ChainRecord
 from .sequence_compare import SequenceComparator
-from .summary import is_solid_match
-from .synteny import BlockIndex, QueryBedRecord, QueryNeighborIndex, RefNeighborIndex, _flanking_blocks
+from .spurious_filter import (
+    ChainEnvelopeCache,
+    DEFAULT_CNEE_R_THRESHOLD,
+    DEFAULT_DEPTH_FILTER_MAX,
+    DEFAULT_EXTEND_GAP_SCORE,
+    DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
+    DEFAULT_FLANK_WINDOW,
+    DEFAULT_MATCH_SCORE,
+    DEFAULT_MISMATCH_SCORE,
+    DEFAULT_OPEN_GAP_SCORE,
+    ProjectionVerdict,
+    build_query_envelopes,
+    classify_projection,
+)
+from .synteny import BlockIndex, _flanking_blocks
 
 ORTHOLOGY_COLUMNS = [
     "query_cnee_id",
     "partner_ref_cnees",
     "orthology_category",
+    "sequence_identity",
+    "gap_fraction",
 ]
 
 CULLED_PROJECTION_COLUMNS = [
@@ -31,6 +47,10 @@ CULLED_PROJECTION_COLUMNS = [
     "query_end",
     "sequence_identity",
     "gap_fraction",
+    "rejection_reason",
+    "locus_depth",
+    "own_cnee_score",
+    "best_competitor_cnee_score",
 ]
 
 REF_CNEE_COLUMNS = [
@@ -40,12 +60,6 @@ REF_CNEE_COLUMNS = [
     "num_projections_pruned",
     "pre_pruning_category",
 ]
-
-# Verification criteria v2 (see synteny_verification.md): retain a projection
-# only if it clears BOTH an align_score and a neighbor-ortholog-fraction bar.
-DEFAULT_MIN_ALIGN_SCORE = 0.5
-DEFAULT_MIN_NEIGHBOR_FRACTION = 0.5
-DEFAULT_VERIFICATION_NUM_NEIGHBORS = 5
 
 # Fallback ref category for a "lost" ref (chain overlap, zero aligned bases)
 # when the query assembly's gap-marker convention can't be confidently
@@ -96,6 +110,7 @@ class ProjectionEvidence:
 class CulledProjection:
     projection: Projection
     initial_orthology_category: str
+    verdict: ProjectionVerdict | None = None
 
 
 @dataclass
@@ -113,6 +128,15 @@ class EdgeMetrics:
     @property
     def projection_count(self) -> int:
         return len(self.projection_metrics)
+
+    def representative(self) -> tuple[float | None, float]:
+        # The (identity, gap) pair to report for this edge in output: the
+        # highest-identity projection among the (possibly several) surviving
+        # projections that landed on it.
+        return max(
+            self.projection_metrics,
+            key=lambda pair: pair[0] if pair[0] is not None else -1.0,
+        )
 
 
 @dataclass
@@ -148,13 +172,16 @@ def classify_orthology(
     index_path: str | Path,
     out_orthology: str | Path,
     out_query_bed: str | Path,
-    min_sequence_identity: float = 0.7,
-    max_fraction_gap: float = 0.1,
-    synteny_check: bool = True,
     sequence_comparator: SequenceComparator | None = None,
-    min_align_score: float = DEFAULT_MIN_ALIGN_SCORE,
-    min_neighbor_fraction: float = DEFAULT_MIN_NEIGHBOR_FRACTION,
-    verification_num_neighbors: int = DEFAULT_VERIFICATION_NUM_NEIGHBORS,
+    filter_multi_projections: bool = True,
+    depth_filter_max: int = DEFAULT_DEPTH_FILTER_MAX,
+    cnee_r_threshold: float = DEFAULT_CNEE_R_THRESHOLD,
+    flank_window: int = DEFAULT_FLANK_WINDOW,
+    flank_any_coverage_threshold: float = DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
+    match_score: float = DEFAULT_MATCH_SCORE,
+    mismatch_score: float = DEFAULT_MISMATCH_SCORE,
+    open_gap_score: float = DEFAULT_OPEN_GAP_SCORE,
+    extend_gap_score: float = DEFAULT_EXTEND_GAP_SCORE,
     out_culled_projections: str | Path | None = None,
     query_fasta: str | Path | None = None,
     min_gap_length: int = DEFAULT_MIN_GAP_LENGTH,
@@ -164,58 +191,58 @@ def classify_orthology(
     """Classify query CNEE loci from overlap stats and write TSV/BED outputs.
 
     Builds a ref<->query graph from every aligned projection, then (unless
-    synteny_check is False) verifies and prunes projections in ambiguous
-    categories -- a non-solid single ref/query edge (putative one2one(weak)),
-    or any edge inside a one2many/many2one/complex component. "lost" refs
-    (zero aligned query bases) are never part of this graph at all, so they
-    are never subject to verification.
+    filter_multi_projections is False) filters projections belonging to any
+    ref CNEE whose initial graph shape is ambiguous -- one2many, many2one,
+    or complex/many2many (a lone ref/query edge is never touched: it is
+    always reported as "one2one", with its own sequence_identity/
+    gap_fraction exposed as output columns instead of being gated on them).
+    "lost" refs (zero aligned query bases) are never part of this graph at
+    all, so they are never subject to filtering either.
 
-    A projection survives verification only if BOTH:
-      - align_score (its own sequence identity relative to the best-scoring
-        projection anywhere in its connected component) exceeds
-        min_align_score, AND
-      - neighbor_fraction (the fraction of its nearest verification_num_neighbors
-        *trusted* reference-CNEE neighbors per flank -- i.e. refs that are
-        themselves a solid one2one and so can't be pruned -- whose own query
-        ortholog falls among this projection's nearest verification_num_neighbors
-        trusted query neighbors) exceeds min_neighbor_fraction. A projection
-        with no trusted neighbor on either flank fails this criterion
-        outright (no synteny evidence to confirm it).
+    Filtering (see spurious_filter.py) is per individual candidate
+    projection, at its own query-side locus:
+      - locus_depth (1 + # other chains genome-wide whose own query envelope
+        overlaps this locus, extended by flank_window each side) >=
+        depth_filter_max: reject outright (repeat-driven pileup).
+      - locus_depth == 1 (no competing chain at all): accept iff the
+        surrounding flanks have aligned-block coverage from ANY chain above
+        flank_any_coverage_threshold.
+      - otherwise: score this projection's own chain and every competing
+        chain's own chain over the locus core window (arithmetic
+        match/mismatch/affine-gap score), normalize by the locus's best
+        score, and accept/reject outright if this projection is clearly
+        best/worst (R >= cnee_r_threshold apart); otherwise fall back to the
+        same score over the flanking windows (raw, not normalized), accepting
+        only if this projection's flank score beats every competitor's.
+
+    filter_multi_projections=True requires sequence_comparator (real ref/
+    query genome sequence access is needed to score candidates).
 
     Query loci are re-clustered from the surviving projections before final
-    categories are assigned, so pruning can split a cluster that was only
+    categories are assigned, so filtering can split a cluster that was only
     held together by a since-removed projection. A ref left with no
     surviving query edge (but that did have some projection) is written to
     out_orthology as "uncertain_loss"; if out_culled_projections is given,
-    every individual pruned projection is also logged there for tracking.
+    every individual rejected projection is also logged there for tracking,
+    along with why it was rejected.
 
-    Any surviving single ref/query edge is reported as plain "one2one" --
-    once verification has run, a weak edge that survived is just as trusted
-    as one that was always solid, so the one2one(weak) label is dropped from
-    final output entirely (it still shows up as an *initial*, pre-pruning
-    category in out_culled_projections).
-
-    Independently of verification, when query_fasta is given, every "lost"
-    ref (zero aligned query bases anywhere) is further split into
-    probable_loss or assembly_gap_loss by checking whether its chain gap's
-    query-side span coincides with an inferred contig-boundary N-run in the
-    query assembly (see assembly_gaps.py). When query_fasta is omitted, or
-    the query assembly's gap-length convention can't be confidently
-    inferred, or a given ref's own chain gap is itself ambiguous, this falls
-    back to the collapsed "missing/loss" category instead of guessing. This
-    sub-categorization, plus per-ref pruning counts, is written to
-    out_ref_cnees if given (see output_files.md) -- out_orthology's own
-    "lost"/"unaligned" labels are unaffected either way.
+    Independently of filtering, when query_fasta is given, every "lost" ref
+    (zero aligned query bases anywhere) is further split into probable_loss
+    or assembly_gap_loss by checking whether its chain gap's query-side span
+    coincides with an inferred contig-boundary N-run in the query assembly
+    (see assembly_gaps.py). When query_fasta is omitted, or the query
+    assembly's gap-length convention can't be confidently inferred, or a
+    given ref's own chain gap is itself ambiguous, this falls back to the
+    collapsed "missing/loss" category instead of guessing. This sub-
+    categorization, plus per-ref pruning counts, is written to out_ref_cnees
+    if given (see output_files.md) -- out_orthology's own "lost"/"unaligned"
+    labels are unaffected either way.
 
     Every graph-assigned query CNEE id is prefixed with query_id_prefix
     (default "q_", e.g. "q_ce1234"). A trailing "_" is appended automatically
     if query_id_prefix doesn't already end with one, so "aphWoo" and
     "aphWoo_" both produce ids like "aphWoo_ce1234".
     """
-    if min_sequence_identity < 0 or min_sequence_identity > 1:
-        raise ValueError("min_sequence_identity must be between 0 and 1")
-    if max_fraction_gap < 0 or max_fraction_gap > 1:
-        raise ValueError("max_fraction_gap must be between 0 and 1")
     if query_id_prefix and not query_id_prefix.endswith("_"):
         query_id_prefix = f"{query_id_prefix}_"
     try:
@@ -234,21 +261,44 @@ def classify_orthology(
     initial_clusters = _cluster_query_projections(evidence.projections)
     initial_graph = _build_orthology_graph(nx, ref_ids, initial_clusters)
 
+    # Chain index is needed both by filtering (chain-envelope search + block
+    # parsing for scoring) and by the lost-ref gap-boundary check below;
+    # loaded at most once and shared between whichever of those need it.
+    need_chain_index = filter_multi_projections or out_ref_cnees is not None
+    chain_records: list[ChainRecord] = []
+    indexed_chain_path: str | Path = index_path
+    if need_chain_index:
+        payload, chain_records = load_index(index_path)
+        indexed_chain_path = payload["indexed_chain_path"]
+
     culled: list[CulledProjection] = []
     initial_category_by_ref: dict[str, str] = {}
-    if synteny_check:
-        surviving, culled, initial_category_by_ref = _verify_and_prune_projections(
-            nx,
-            evidence.projections,
-            initial_graph,
-            initial_clusters,
-            cnee_bed,
-            min_sequence_identity,
-            max_fraction_gap,
-            min_align_score,
-            min_neighbor_fraction,
-            verification_num_neighbors,
-        )
+    if filter_multi_projections:
+        initial_category_by_ref = _initial_category_by_ref(nx, initial_graph)
+        if initial_category_by_ref:
+            if sequence_comparator is None:
+                raise ValueError(
+                    "sequence_comparator is required when filter_multi_projections is True "
+                    "(real ref/query sequence access is needed to score candidate projections "
+                    "against their competitors)"
+                )
+            surviving, culled = _filter_multi_projections(
+                evidence.projections,
+                initial_category_by_ref,
+                chain_records,
+                indexed_chain_path,
+                sequence_comparator,
+                depth_filter_max,
+                cnee_r_threshold,
+                flank_window,
+                flank_any_coverage_threshold,
+                match_score,
+                mismatch_score,
+                open_gap_score,
+                extend_gap_score,
+            )
+        else:
+            surviving = list(evidence.projections)
         final_clusters = _cluster_query_projections(surviving)
         final_graph = _build_orthology_graph(nx, ref_ids, final_clusters)
     else:
@@ -280,7 +330,9 @@ def classify_orthology(
             gap_convention, candidate_index = scan_query_assembly_gaps(query_fasta, min_gap_length)
             if gap_convention.confidence != "none":
                 n_run_index = candidate_index
-        lost_category_by_ref = _classify_lost_refs(lost_gap_candidates, index_path, n_run_index)
+        lost_category_by_ref = _classify_lost_refs(
+            lost_gap_candidates, chain_records, indexed_chain_path, n_run_index
+        )
         ref_cnee_count = _write_ref_cnee_tsv(
             ref_ids,
             final_clusters,
@@ -425,288 +477,114 @@ def _build_orthology_graph(nx, ref_ids: list[str], clusters: list[QueryCluster])
     return graph
 
 
-def _edge_is_solid(
-    edge_data: dict,
-    min_sequence_identity: float,
-    max_fraction_gap: float,
-) -> bool:
-    # An edge is solid only if at least one single projection meets both
-    # criteria together; metrics are never blended across projections.
-    return any(
-        is_solid_match(sequence_identity, fraction_gap, min_sequence_identity, max_fraction_gap)
-        for sequence_identity, fraction_gap in edge_data["projection_metrics"]
-    )
-
-
 # --------------------------------------------------------------------------
-# Synteny verification (v2): decide, per projection, whether it survives into
-# the final graph. Only applied to "ambiguous" categories -- a non-solid lone
-# ref/query edge, or any edge inside a one2many/many2one/complex component --
-# a clean solid one2one edge is never second-guessed, and "lost" refs (no
-# aligned query bases at all, so no Projection object exists for them) never
-# enter this graph in the first place.
+# Depth/score filtering: applied only to projections belonging to a ref CNEE
+# whose initial graph shape is ambiguous (one2many/many2one/complex/
+# many2many). A lone ref/query edge is never filtered -- it is always
+# reported as "one2one" (see spurious_filter.py for the per-projection
+# decision tree itself).
 # --------------------------------------------------------------------------
 
 
-def _query_neighbor_index_from_clusters(clusters: list[QueryCluster]) -> QueryNeighborIndex:
-    by_chrom: dict[str, list[QueryBedRecord]] = defaultdict(list)
-    for cluster in clusters:
-        by_chrom[cluster.chrom].append(
-            QueryBedRecord(
-                chrom=cluster.chrom, start=cluster.start, end=cluster.end, query_id=cluster.node_id
-            )
-        )
-    return QueryNeighborIndex.from_records(by_chrom)
+def _initial_category_by_ref(nx, initial_graph) -> dict[str, str]:
+    """Every ref's pre-filtering graph-shape category.
 
-
-def _initial_verification_state(
-    nx, initial_graph, min_sequence_identity: float, max_fraction_gap: float
-) -> tuple[dict[str, str], set[str], dict[str, int]]:
-    """Categorize every ref from the raw, pre-pruning graph shape.
-
-    Returns (initial_category_by_ref, trusted_ref_ids, component_id_by_ref):
-    - initial_category_by_ref: the would-be category for every ref that needs
-      verification (one2one(weak)/one2many/many2one/complex/many2many).
-      Absence from this dict means the ref doesn't need verification at all
-      (a solid lone one2one edge, or a ref with no projections).
-    - trusted_ref_ids: refs NOT needing verification, i.e. already a solid
-      lone one2one edge. Per synteny_verification.md v2, only these are
-      eligible as synteny anchors for scoring *other* candidates -- a ref
-      that might itself get pruned can't vouch for one still being verified.
-    - component_id_by_ref: every ref's connected-component id in the initial
-      graph, so a projection's siblings (for align_score) can be gathered.
+    A ref absent from this dict is either a lone one2one edge (never
+    filtered, always kept) or has no projections at all.
     """
     initial_category_by_ref: dict[str, str] = {}
-    trusted_ref_ids: set[str] = set()
-    component_id_by_ref: dict[str, int] = {}
-    for component_id, component in enumerate(nx.connected_components(initial_graph)):
+    for component in nx.connected_components(initial_graph):
         ref_nodes = [node for node in component if str(node).startswith("ref:")]
         query_nodes = [node for node in component if str(node).startswith("query:")]
         if not ref_nodes or not query_nodes:
             continue
-        for node in ref_nodes:
-            component_id_by_ref[_node_ref_id(node)] = component_id
         if len(ref_nodes) == 1 and len(query_nodes) == 1:
-            edge_data = initial_graph.edges[ref_nodes[0], query_nodes[0]]
-            if _edge_is_solid(edge_data, min_sequence_identity, max_fraction_gap):
-                trusted_ref_ids.add(_node_ref_id(ref_nodes[0]))
-            else:
-                initial_category_by_ref[_node_ref_id(ref_nodes[0])] = "one2one(weak)"
-        elif len(ref_nodes) == 1:
-            initial_category_by_ref[_node_ref_id(ref_nodes[0])] = "one2many"
+            continue
+        if len(ref_nodes) == 1:
+            category = "one2many"
         elif len(query_nodes) == 1:
-            for node in ref_nodes:
-                initial_category_by_ref[_node_ref_id(node)] = "many2one"
+            category = "many2one"
         else:
-            for node in ref_nodes:
-                initial_category_by_ref[_node_ref_id(node)] = "complex/many2many"
-    return initial_category_by_ref, trusted_ref_ids, component_id_by_ref
+            category = "complex/many2many"
+        for node in ref_nodes:
+            initial_category_by_ref[_node_ref_id(node)] = category
+    return initial_category_by_ref
 
 
-def _trusted_ref_neighbor_chain(
-    ref_neighbor_index: RefNeighborIndex,
-    trusted_ref_ids: set[str],
-    ref_id: str,
-    side: str,
-    count: int,
-) -> list[str]:
-    # Walk outward along the reference genome from ref_id, skipping any CNEE
-    # that isn't itself a trusted anchor, collecting up to `count` ids.
-    chrom = ref_neighbor_index.chrom_by_uid.get(ref_id)
-    if chrom is None:
-        return []
-    intervals = ref_neighbor_index.intervals_by_chrom[chrom]
-    position = ref_neighbor_index.position_by_uid[ref_id]
-    step = -1 if side == "left" else 1
-    found: list[str] = []
-    index = position + step
-    while 0 <= index < len(intervals) and len(found) < count:
-        candidate_id = intervals[index].cnee_uid
-        if candidate_id in trusted_ref_ids:
-            found.append(candidate_id)
-        index += step
-    return found
-
-
-def _trusted_query_neighbor_chain(
-    trusted_query_index: QueryNeighborIndex,
-    trusted_query_cluster_by_node_id: dict[str, QueryCluster],
-    chrom: str,
-    anchor: int,
-    direction: str,
-    count: int,
-) -> set[str]:
-    # Walk outward along the query genome from anchor, through only the
-    # trusted-only index, re-anchoring on each found cluster's far edge.
-    found: set[str] = set()
-    current = anchor
-    for _ in range(count):
-        node_id, _distance = trusted_query_index.neighbor(chrom, current, direction)
-        if node_id is None:
-            break
-        found.add(node_id)
-        cluster = trusted_query_cluster_by_node_id[node_id]
-        current = cluster.start if direction == "before" else cluster.end
-    return found
-
-
-def _score_projection(
-    projection: Projection,
-    trusted_ref_ids: set[str],
-    ref_neighbor_index: RefNeighborIndex,
-    trusted_query_node_by_ref: dict[str, str],
-    trusted_query_index: QueryNeighborIndex,
-    trusted_query_cluster_by_node_id: dict[str, QueryCluster],
-    max_identity_by_component: dict[int, float],
-    component_id_by_ref: dict[str, int],
-    num_neighbors: int,
-) -> tuple[float, float | None]:
-    """Score a single projection's align_score and neighbor_fraction.
-
-    align_score: this projection's own sequence identity relative to the
-    best-scoring projection anywhere in its connected component (including
-    itself, so the component's best projection always lands at exactly 1.0;
-    a lone one2one(weak) projection is trivially its own component max, so it
-    always scores 1.0 too).
-
-    neighbor_fraction: of the nearest `num_neighbors` trusted reference-CNEE
-    neighbors on EACH flank (so up to 2 * num_neighbors checked total), the
-    fraction whose own trusted query ortholog falls among this projection's
-    own nearest `num_neighbors` trusted query neighbors. None if neither
-    flank has any trusted neighbor at all (no synteny evidence either way).
-    """
-    component_id = component_id_by_ref[projection.ref_id]
-    max_identity = max_identity_by_component.get(component_id, 0.0)
-    if max_identity <= 0:
-        align_score = 1.0
-    else:
-        align_score = (projection.sequence_identity or 0.0) / max_identity
-
-    # Reference and query coordinates are both normalized to plus-strand
-    # genome coordinates, so the anchor that corresponds to the reference's
-    # LEFT side flips to the query interval's END when strand is "-".
-    forward = projection.query_strand == "+"
-    if forward:
-        anchors = {"left": (projection.query_start, "before"), "right": (projection.query_end, "after")}
-    else:
-        anchors = {"left": (projection.query_end, "after"), "right": (projection.query_start, "before")}
-
-    total_checked = 0
-    total_matched = 0
-    for side in ("left", "right"):
-        ref_neighbors = _trusted_ref_neighbor_chain(
-            ref_neighbor_index, trusted_ref_ids, projection.ref_id, side, num_neighbors
-        )
-        if not ref_neighbors:
-            continue
-        anchor, direction = anchors[side]
-        query_neighbor_ids = _trusted_query_neighbor_chain(
-            trusted_query_index,
-            trusted_query_cluster_by_node_id,
-            projection.query_chrom,
-            anchor,
-            direction,
-            num_neighbors,
-        )
-        for neighbor_ref_id in ref_neighbors:
-            total_checked += 1
-            neighbor_query_node = trusted_query_node_by_ref.get(neighbor_ref_id)
-            if neighbor_query_node is not None and neighbor_query_node in query_neighbor_ids:
-                total_matched += 1
-
-    neighbor_fraction = (total_matched / total_checked) if total_checked else None
-    return align_score, neighbor_fraction
-
-
-def _verify_and_prune_projections(
-    nx,
+def _filter_multi_projections(
     projections: list[Projection],
-    initial_graph,
-    initial_clusters: list[QueryCluster],
-    cnee_bed: str | Path,
-    min_sequence_identity: float,
-    max_fraction_gap: float,
-    min_align_score: float,
-    min_neighbor_fraction: float,
-    num_neighbors: int,
-) -> tuple[list[Projection], list[CulledProjection], dict[str, str]]:
-    initial_category_by_ref, trusted_ref_ids, component_id_by_ref = _initial_verification_state(
-        nx, initial_graph, min_sequence_identity, max_fraction_gap
-    )
-    if not initial_category_by_ref:
-        return list(projections), [], initial_category_by_ref
-
-    # Every trusted ref is, by definition, a solid lone one2one -- exactly
-    # one query cluster, so this lookup is never ambiguous for trusted refs.
-    query_node_by_ref: dict[str, str] = {}
-    for cluster in initial_clusters:
-        for ref_id in cluster.refs:
-            query_node_by_ref.setdefault(ref_id, cluster.node_id)
-    trusted_query_node_by_ref = {
-        ref_id: query_node_by_ref[ref_id] for ref_id in trusted_ref_ids if ref_id in query_node_by_ref
-    }
-    trusted_cluster_ids = set(trusted_query_node_by_ref.values())
-    trusted_query_clusters = [c for c in initial_clusters if c.node_id in trusted_cluster_ids]
-    trusted_query_index = _query_neighbor_index_from_clusters(trusted_query_clusters)
-    trusted_query_cluster_by_node_id = {c.node_id: c for c in trusted_query_clusters}
-
-    ref_neighbor_index = RefNeighborIndex.from_bed(cnee_bed)
-
-    projections_by_component: dict[int, list[Projection]] = defaultdict(list)
-    for projection in projections:
-        component_id = component_id_by_ref.get(projection.ref_id)
-        if component_id is not None:
-            projections_by_component[component_id].append(projection)
-    max_identity_by_component = {
-        component_id: max((p.sequence_identity or 0.0) for p in comp_projections)
-        for component_id, comp_projections in projections_by_component.items()
-    }
-
-    surviving: list[Projection] = []
-    culled: list[CulledProjection] = []
-    for projection in projections:
-        initial_category = initial_category_by_ref.get(projection.ref_id)
-        if initial_category is None:
-            surviving.append(projection)
-            continue
-        align_score, neighbor_fraction = _score_projection(
-            projection,
-            trusted_ref_ids,
-            ref_neighbor_index,
-            trusted_query_node_by_ref,
-            trusted_query_index,
-            trusted_query_cluster_by_node_id,
-            max_identity_by_component,
-            component_id_by_ref,
-            num_neighbors,
-        )
-        passes = (
-            align_score > min_align_score
-            and neighbor_fraction is not None
-            and neighbor_fraction > min_neighbor_fraction
-        )
-        if passes:
-            surviving.append(projection)
-        else:
-            culled.append(
-                CulledProjection(projection=projection, initial_orthology_category=initial_category)
+    initial_category_by_ref: dict[str, str],
+    chain_records: list[ChainRecord],
+    indexed_chain_path: str | Path,
+    sequence_comparator: SequenceComparator,
+    depth_filter_max: int,
+    cnee_r_threshold: float,
+    flank_window: int,
+    flank_any_coverage_threshold: float,
+    match_score: float,
+    mismatch_score: float,
+    open_gap_score: float,
+    extend_gap_score: float,
+) -> tuple[list[Projection], list[CulledProjection]]:
+    records_by_id = {record.chain_id: record for record in chain_records}
+    envelopes = build_query_envelopes(chain_records)
+    cache = ChainEnvelopeCache(indexed_chain_path, records_by_id)
+    try:
+        surviving: list[Projection] = []
+        culled: list[CulledProjection] = []
+        for projection in projections:
+            category = initial_category_by_ref.get(projection.ref_id)
+            if category is None:
+                surviving.append(projection)
+                continue
+            record = records_by_id[projection.chain_id]
+            verdict = classify_projection(
+                chain_id=projection.chain_id,
+                query_chrom=projection.query_chrom,
+                query_start=projection.query_start,
+                query_end=projection.query_end,
+                ref_chrom=record.ref_chrom,
+                records_by_id=records_by_id,
+                envelopes=envelopes,
+                cache=cache,
+                ref_accessor=sequence_comparator.ref,
+                query_accessor=sequence_comparator.query,
+                flank_window=flank_window,
+                depth_filter_max=depth_filter_max,
+                flank_any_coverage_threshold=flank_any_coverage_threshold,
+                cnee_r_threshold=cnee_r_threshold,
+                match_score=match_score,
+                mismatch_score=mismatch_score,
+                open_gap_score=open_gap_score,
+                extend_gap_score=extend_gap_score,
             )
-    return surviving, culled, initial_category_by_ref
+            if verdict.accepted:
+                surviving.append(projection)
+            else:
+                culled.append(
+                    CulledProjection(
+                        projection=projection, initial_orthology_category=category, verdict=verdict
+                    )
+                )
+        return surviving, culled
+    finally:
+        cache.close()
 
 
 # --------------------------------------------------------------------------
 # "Lost" ref sub-categorization: a ref whose CNEE sits entirely inside a
 # chain gap (zero aligned query bases) is split into probable_loss (the gap
 # isn't a query assembly artifact) vs assembly_gap_loss (it is), using the
-# query genome's inferred contig-boundary N-runs. Independent of synteny
-# verification -- this always runs (when a query FASTA is available),
-# regardless of synteny_check.
+# query genome's inferred contig-boundary N-runs. Independent of filtering --
+# this always runs (when a query FASTA is available), regardless of
+# filter_multi_projections.
 # --------------------------------------------------------------------------
 
 
 def _classify_lost_refs(
     lost_gap_candidates: dict[str, LostGapCandidate],
-    index_path: str | Path,
+    chain_records: list[ChainRecord],
+    indexed_chain_path: str | Path,
     n_run_index: NRunIndex | None,
 ) -> dict[str, str]:
     """Categorize each "lost" ref as probable_loss / assembly_gap_loss.
@@ -725,12 +603,10 @@ def _classify_lost_refs(
     if n_run_index is None:
         return {ref_id: UNCERTAIN_LOSS_TYPE_CATEGORY for ref_id in lost_gap_candidates}
 
-    payload, records = load_index(index_path)
-    record_by_chain_id = {record.chain_id: record for record in records}
-    chain_path = payload["indexed_chain_path"]
+    record_by_chain_id = {record.chain_id: record for record in chain_records}
     block_cache: dict[str, BlockIndex] = {}
 
-    with Path(chain_path).open("rb") as chain_handle:
+    with Path(indexed_chain_path).open("rb") as chain_handle:
         for ref_id, candidate in lost_gap_candidates.items():
             record = record_by_chain_id[candidate.chain_id]
             if candidate.chain_id not in block_cache:
@@ -769,9 +645,9 @@ def _assign_orthology_categories(
     query_id_prefix: str,
 ) -> None:
     # Assign query IDs and broad orthology categories from graph components.
-    # A surviving lone ref/query edge is always "one2one" -- if it started
-    # weak, it only got here by passing synteny verification, so there's
-    # nothing left to distinguish it from an edge that was always solid.
+    # A surviving lone ref/query edge is always "one2one" -- there is
+    # nothing left to distinguish it from an edge that always had a single
+    # candidate, since no accept/reject decision is ever applied to it.
     cluster_by_node = {cluster.node_id: cluster for cluster in clusters}
     component_counter = 0
     for component in sorted(
@@ -820,7 +696,7 @@ def _write_orthology_tsv(
 ) -> int:
     # Write compact query/ref/category rows, including lost/unaligned/
     # uncertain_loss references. Since clusters here are already the final
-    # (post-verification) result, a cluster's own .refs set IS the correct
+    # (post-filtering) result, a cluster's own .refs set IS the correct
     # partner list -- no separate filtered-graph lookup needed.
     count = 0
     refs_with_final_query_edge: set[str] = set()
@@ -838,11 +714,19 @@ def _write_orthology_tsv(
                 continue
             partner_refs = sorted(cluster.refs)
             refs_with_final_query_edge.update(partner_refs)
+            identities: list[str] = []
+            gaps: list[str] = []
+            for ref_id in partner_refs:
+                identity, gap = cluster.edge_metrics[ref_id].representative()
+                identities.append("." if identity is None else str(identity))
+                gaps.append(str(gap))
             writer.writerow(
                 {
                     "query_cnee_id": cluster.query_cnee_id,
                     "partner_ref_cnees": ",".join(partner_refs),
                     "orthology_category": cluster.orthology_category,
+                    "sequence_identity": ",".join(identities),
+                    "gap_fraction": ",".join(gaps),
                 }
             )
             count += 1
@@ -861,6 +745,8 @@ def _write_orthology_tsv(
                     "query_cnee_id": "NA",
                     "partner_ref_cnees": ref_id,
                     "orthology_category": category,
+                    "sequence_identity": ".",
+                    "gap_fraction": ".",
                 }
             )
             count += 1
@@ -892,10 +778,10 @@ def _write_query_bed(clusters: list[QueryCluster], out_path: str | Path) -> int:
 
 
 def _write_culled_projections_tsv(culled: list[CulledProjection], out_path: str | Path) -> int:
-    # Log every individual projection synteny verification pruned, for
-    # tracking -- these refs end up "uncertain_loss" in out_orthology (unless
-    # a sibling projection of the same ref survived), but this is the only
-    # place the specific culled projection(s) themselves are recorded.
+    # Log every individual projection filtering rejected, for tracking --
+    # these refs end up "uncertain_loss" in out_orthology (unless a sibling
+    # projection of the same ref survived), but this is the only place the
+    # specific rejected projection(s) themselves, and why, are recorded.
     count = 0
     with Path(out_path).open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
@@ -910,6 +796,7 @@ def _write_culled_projections_tsv(culled: list[CulledProjection], out_path: str 
             key=lambda c: (c.projection.ref_id, c.projection.query_chrom, c.projection.query_start),
         ):
             projection = item.projection
+            verdict = item.verdict
             writer.writerow(
                 {
                     "projection_name": projection.projection_name,
@@ -922,6 +809,16 @@ def _write_culled_projections_tsv(culled: list[CulledProjection], out_path: str 
                         "." if projection.sequence_identity is None else projection.sequence_identity
                     ),
                     "gap_fraction": projection.fraction_gap,
+                    "rejection_reason": verdict.outcome if verdict else ".",
+                    "locus_depth": verdict.locus_depth if verdict else ".",
+                    "own_cnee_score": (
+                        "." if verdict is None or verdict.own_cnee_score is None else verdict.own_cnee_score
+                    ),
+                    "best_competitor_cnee_score": (
+                        "."
+                        if verdict is None or verdict.best_competitor_cnee_score is None
+                        else verdict.best_competitor_cnee_score
+                    ),
                 }
             )
             count += 1
@@ -944,10 +841,11 @@ def _write_ref_cnee_tsv(
     many2one/complex/many2many for a ref with a surviving query edge,
     otherwise unaligned/probable_loss/assembly_gap_loss/"missing/loss"/
     uncertain_loss. pre_pruning_category is the same value for anything
-    verification never touches (unaligned, the loss subtypes); for anything
-    that went through verification it's the raw pre-pruning graph shape,
-    which can differ from the final category (e.g. an initial
-    complex/many2many that pruned down to a lone one2one edge).
+    filtering never touches (unaligned, the loss subtypes, and lone one2one
+    edges); for anything that went through filtering it's the raw
+    pre-filtering graph shape, which can differ from the final category
+    (e.g. an initial complex/many2many that filtered down to a lone one2one
+    edge).
     """
     final_category_by_ref: dict[str, str] = {}
     final_count_by_ref: dict[str, int] = defaultdict(int)
