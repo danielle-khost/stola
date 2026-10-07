@@ -910,7 +910,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(culled_row["ref_cnee_id"], "MULTI")
         self.assertEqual(culled_row["query_chrom"], "chrQ2")
         self.assertEqual(culled_row["initial_orthology_category"], "one2many")
-        self.assertEqual(culled_row["rejection_reason"], "rejected_cnee_clear_loser")
+        self.assertEqual(culled_row["rejection_reason"], "low_score")
         self.assertEqual(culled_row["locus_depth"], "2")
         # Raw score (50 mismatches * -1 = -50) is floored at 0 -- a
         # net-negative window reads as "no real signal" rather than an

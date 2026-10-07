@@ -76,25 +76,38 @@ Be sure that the naming conventions match between the chain, BED and genome file
 
 ## Analysis
 ### Utility scripts
-*scripts/compare_cross_orthology.py*: collects orthology info across multiple runs of the same reference against different queries, and outputs FASTA file of shared one2one orthologs (true by default; disable this behavior with the flag `--no-fasta`).
+*scripts/compare_cross_orthology.py*: collects orthology info across multiple runs of the same reference against different queries. Organized into run modes (see `--help` on each subcommand, and dev_docs/compare_cross_orthology.md):
+- `summary`: build the combined per-species orthology-category TSV
+- `sequence`: extract FASTA sequence of shared one2one orthologs
+- `cluster`: compute the D statistic of phylogenetic signal (Fritz & Purvis 2010) for CNEE loss on a tree
 
 Useage:
 ```
-python scripts/compare_cross_orthology.py \\
+python scripts/compare_cross_orthology.py summary \\
     --query-dirs run_dirs.txt \\
+    --ref-bed reference_cnees.bed \\
+    --ref-prefix dummyRef \\
+    --out-dir .
+
+python scripts/compare_cross_orthology.py sequence \\
+    --query-dirs run_dirs.txt \\
+    --orthology-table dummyRef_combined_orthology.tsv \\
     --ref-bed reference_cnees.bed \\
     --ref-prefix dummyRef \\
     --ref-genome path/to/ref.fasta|2bit \\
     --min-length 40 \\
-    --max-seqs 100000 \\
-    --ortho-frac 0.9
+    --max-seqs 300000 \\
+    --max-lost-frac 0.3 \\
+    --max-multi-frac 0.1 \\
     --out-dir .
 ```
 
 The `run_dirs.txt` file should be a list of full paths to output directories from multiple runs, one directory per line. 
 
-If outputting one2one orthologs, include the argument `--ref-genome` with the path to the reference 2bit/FASTA genome. Also, in the `run_dirs.txt` file add a second column (tab separated) for each sample with a path to the query 2bit/FASTA genome. This will generate one FASTA file for each ortholog set, which are output to subdirectories contained in `one2one_ortholog_fasta/`. A given CNEE must be one2one in at least 90% of samples in order to be output; you can tune this using the `--ortho-frac` parameter.
-By default the script outputs only CNEEs >40bp (`--min-length`) and a maximum of 100000 individual CNEE FASTA files (`--max-seqs`). Set either of these two parameters to `0` to disable filtering and/or output all shared orthologs. 
+`summary` mode also writes two bar-chart SVGs alongside the combined TSV: how many reference CNEEs were lost in exactly 0, 1, 2, ... of the samples (`<ref-prefix>.loss_frequency_distribution.svg`), and the same for multi-projection (`<ref-prefix>.multiproj_frequency_distribution.svg`).
+
+`sequence` mode always outputs one2one orthologs, and reads its per-sample orthology categories from the TSV that `summary` mode already built for the *same* `run_dirs.txt` (pass it via `--orthology-table`) rather than recomputing them. Include the argument `--ref-genome` with the path to the reference 2bit/FASTA genome, and in the `run_dirs.txt` file add a second column (tab separated) for each sample with a path to the query 2bit/FASTA genome. This will generate one FASTA file for each ortholog set, which are output to subdirectories contained in `one2one_ortholog_fasta/`. A CNEE qualifies for extraction if it's lost in at most `--max-lost-frac` of samples AND multi-projection in at most `--max-multi-frac` of samples (a sample where it isn't one2one gets an all-N placeholder sequence in its output file rather than being excluded outright).
+By default the script outputs only CNEEs >40bp (`--min-length`) and a maximum of 300000 individual CNEE FASTA files (`--max-seqs`). Set either of these two parameters to `0` to disable filtering and/or output all shared orthologs. 
 
 You may optionally include a third column (tab separated) with a species prefix to use for that sample; otherwise, the script will attempt to use the query prefix present in the output files from that run. Example:
 
@@ -103,6 +116,20 @@ out/dummyRef_vs_queryA  path/to/queryA.fasta|2bit  sppA
 out/dummyRef_vs_queryB  path/to/queryB.fasta|2bit
 out/dummyRef_vs_queryC  path/to/queryC.fasta|2bit sppC
 ```
+
+`cluster` mode computes, per ref CNEE lost in at least `--min-lost` species (default 3; always skipped if lost in 0 or all species, since D is undefined for an invariant trait), the Fritz & Purvis D statistic of phylogenetic signal for its present/lost pattern on a given tree:
+
+```
+python scripts/compare_cross_orthology.py cluster \\
+    --orthology-table dummyRef_combined_orthology.tsv \\
+    --tree species.nwk \\
+    --ref-prefix dummyRef \\
+    --min-lost 3 \\
+    --n-perms 10 \\
+    --out-dir .
+```
+
+The tree's tip labels must exactly match the species labels used as columns in `--orthology-table`. Writes `<ref-prefix>_phylo_d.tsv` (`ref_cnee_id`, `n_lost`, `D`) plus a density plot of D values at `figures/<ref-prefix>.phylo_d_density.png`. D≈0 indicates a clumped/Brownian-motion-like loss pattern (phylogenetic signal); D≈1 indicates no phylogenetic signal (random with respect to the tree). `--n-perms` controls how many permutations/simulations build each of the two null distributions (random, Brownian motion) — these are computed once per distinct count of lost species (not per CNEE), since both null distributions depend only on that count, not on which particular species are lost.
 
 ### Summary figures
 

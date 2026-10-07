@@ -32,3 +32,4 @@ exploratory_analysis/
 model_training/
 *.axt
 *.maf
+*.bak

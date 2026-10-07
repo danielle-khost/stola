@@ -1,11 +1,23 @@
 #!/usr/bin/env python
-"""Collect per-reference-CNEE orthology status across multiple pipeline runs.
+"""Compare per-reference-CNEE orthology status across multiple pipeline runs.
 
 Takes a list of `toga4cnee run` output directories -- the same reference BED
-lifted to different query species -- and builds one combined TSV where each
-row is a reference CNEE and each column is a query species' final
-orthology_category for that CNEE, read from each directory's
-ref_ortho_status.tsv 
+lifted to different query species -- and offers three run modes (see
+dev_docs/compare_cross_orthology.md):
+
+    summary: build one combined TSV where each row is a reference CNEE and
+        each column is a query species' final orthology_category for that
+        CNEE, read from each directory's ref_ortho_status.tsv, plus two
+        bar-chart SVGs of loss/multi-projection frequency across samples.
+    sequence: extract FASTA sequence for reference CNEEs that are one2one
+        in enough samples (per the `summary`-mode orthology table), one
+        <ref_cnee_id>_orthologs.fasta per CNEE.
+    cluster: for each ref CNEE lost in enough species (per the `summary`-mode
+        orthology table), compute the D statistic of phylogenetic signal
+        (Fritz & Purvis 2010) for its present/lost pattern on a given tree.
+        Needs toytree/pandas/numpy/matplotlib (all present in the `biopython`
+        conda env already used for `sequence` mode); not a hard dependency
+        of the other two modes.
 """
 
 from __future__ import annotations
@@ -22,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from toga4cnee.bed import parse_bed
 from toga4cnee.genome_io import open_genome_accessor
 from toga4cnee.orthology import ORTHOLOGY_COLUMNS, REF_CNEE_COLUMNS
+from toga4cnee.plots import _bar_svg
 from toga4cnee.workflow import (
     QUERY_BED_FILENAME,
     QUERY_ORTHOLOGY_FILENAME,
@@ -33,6 +46,24 @@ GENERIC_LABEL = "q"  # DEFAULT_QUERY_ID_PREFIX ("q_") stripped of its trailing "
 FASTA_SUBDIR_NAME = "one2one_ortholog_fasta"
 FASTA_BATCH_SIZE = 10000
 FASTA_LINE_WIDTH = 60
+
+# Reference-only categories from orthology.py -- no query ortholog was found
+# in that sample at all. Any category not recognized as one2one or
+# multi-projection (including a table cell that's "NA" or some future
+# category) is conservatively treated as lost too, rather than silently
+# counted as a usable ortholog.
+LOST_CATEGORIES = frozenset(
+    {"unaligned", "probable_loss", "assembly_gap_loss", "uncertain_loss", "missing/loss"}
+)
+MULTI_CATEGORIES = frozenset({"one2many", "many2one", "complex/many2many"})
+
+
+def _category_kind(category: str | None) -> str:
+    if category == "one2one":
+        return "one2one"
+    if category in MULTI_CATEGORIES:
+        return "multi"
+    return "lost"
 
 
 @dataclass
@@ -157,14 +188,22 @@ def _sanitize_filename(value: str) -> str:
 
 
 def collect_cross_run_orthology(
-    run_dirs: list[tuple[Path, Path | None, str | None]], build_fasta_data: bool
+    run_dirs: list[tuple[Path, Path | None, str | None]],
+    build_fasta_data: bool,
+    require_ref_ortho_status: bool = True,
 ) -> list[RunColumn]:
+    """require_ref_ortho_status controls whether each run's
+    REF_ORTHOLOGY_FILENAME is required and loaded into the returned column's
+    category_by_ref. `sequence` mode gets its categories from an already-built
+    `summary`-mode orthology table instead (see _read_combined_orthology_table),
+    so it passes False here and fills category_by_ref in from that table
+    itself; category_by_ref comes back empty per column when this is False."""
     columns: list[RunColumn] = []
     used_labels: set[str] = set()
     for run_dir, genome_path, manual_label in run_dirs:
         ref_orthology_path = run_dir / REF_ORTHOLOGY_FILENAME
         query_orthology_path = run_dir / QUERY_ORTHOLOGY_FILENAME
-        if not ref_orthology_path.is_file():
+        if require_ref_ortho_status and not ref_orthology_path.is_file():
             print(f"warning: skipping {run_dir} (missing {REF_ORTHOLOGY_FILENAME})", file=sys.stderr)
             continue
 
@@ -196,16 +235,45 @@ def collect_cross_run_orthology(
 
         label = _dedupe_label(label, used_labels, run_dir)
         used_labels.add(label)
+        category_by_ref = _read_ref_orthology(ref_orthology_path) if require_ref_ortho_status else {}
         columns.append(
             RunColumn(
                 label=label,
-                category_by_ref=_read_ref_orthology(ref_orthology_path),
+                category_by_ref=category_by_ref,
                 run_dir=run_dir,
                 genome_path=genome_path,
             )
         )
 
     return columns
+
+
+def _read_combined_orthology_table(table_path: str | Path) -> dict[str, dict[str, str]]:
+    """Read a `summary`-mode combined orthology TSV back in, returning
+    {species_label: {ref_cnee_id: orthology_category}} -- i.e. one
+    RunColumn.category_by_ref-shaped dict per column, keyed by that column's
+    header cell (its species label)."""
+    table_path = Path(table_path)
+    with table_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle, delimiter="\t")
+        try:
+            header = next(reader)
+        except StopIteration:
+            raise ValueError(f"{table_path} is empty") from None
+        if not header or header[0] != "ref_ID":
+            raise ValueError(
+                f"{table_path} does not look like a `summary`-mode combined orthology TSV "
+                "(expected 'ref_ID' as the first column)"
+            )
+        labels = header[1:]
+        category_by_ref_by_label: dict[str, dict[str, str]] = {label: {} for label in labels}
+        for row in reader:
+            if not row:
+                continue
+            ref_id = row[0]
+            for label, category in zip(labels, row[1:]):
+                category_by_ref_by_label[label][ref_id] = category
+    return category_by_ref_by_label
 
 
 def write_combined_orthology(
@@ -217,6 +285,68 @@ def write_combined_orthology(
         for ref_id in ref_ids:
             writer.writerow([ref_id] + [col.category_by_ref.get(ref_id, "NA") for col in columns])
     return len(ref_ids)
+
+
+def _compute_frequency_distributions(
+    ref_ids: list[str], columns: list[RunColumn]
+) -> tuple[list[int], list[int]]:
+    # loss_counts[i]/multi_counts[i] = number of ref CNEEs that are lost/
+    # multi-projection (see LOST_CATEGORIES/MULTI_CATEGORIES) in exactly i
+    # of the n_columns samples. Single pass over ref_ids x columns so both
+    # distributions share the same per-ref category lookups.
+    n_columns = len(columns)
+    loss_counts = [0] * (n_columns + 1)
+    multi_counts = [0] * (n_columns + 1)
+    for ref_id in ref_ids:
+        n_lost = 0
+        n_multi = 0
+        for col in columns:
+            kind = _category_kind(col.category_by_ref.get(ref_id))
+            if kind == "lost":
+                n_lost += 1
+            elif kind == "multi":
+                n_multi += 1
+        loss_counts[n_lost] += 1
+        multi_counts[n_multi] += 1
+    return loss_counts, multi_counts
+
+
+def write_frequency_distribution_plots(
+    ref_ids: list[str], columns: list[RunColumn], ref_prefix: str, out_dir: Path
+) -> tuple[Path, Path]:
+    # Per dev_docs/compare_cross_orthology.md's "Summary figures": how many
+    # ref CNEEs were lost in exactly 0, 1, 2, ... of the samples, and same
+    # for multi-projection -- one bar chart each.
+    n_columns = len(columns)
+    labels = [str(i) for i in range(n_columns + 1)]
+    loss_counts, multi_counts = _compute_frequency_distributions(ref_ids, columns)
+
+    loss_path = Path(out_dir) / f"{ref_prefix}.loss_frequency_distribution.svg"
+    loss_path.write_text(
+        _bar_svg(
+            title="CNEE loss frequency across samples",
+            subtitle=f"Reference CNEEs: {len(ref_ids):,}; samples: {n_columns}",
+            x_label="Number of samples lost in",
+            y_label="Reference CNEEs",
+            labels=labels,
+            counts=loss_counts,
+        ),
+        encoding="utf-8",
+    )
+
+    multi_path = Path(out_dir) / f"{ref_prefix}.multiproj_frequency_distribution.svg"
+    multi_path.write_text(
+        _bar_svg(
+            title="CNEE multi-projection frequency across samples",
+            subtitle=f"Reference CNEEs: {len(ref_ids):,}; samples: {n_columns}",
+            x_label="Number of samples multi-projection in",
+            y_label="Reference CNEEs",
+            labels=labels,
+            counts=multi_counts,
+        ),
+        encoding="utf-8",
+    )
+    return loss_path, multi_path
 
 
 def _write_fasta_records(records: list[tuple[str, str]], out_path: Path) -> None:
@@ -236,13 +366,17 @@ def extract_one2one_orthologs(
     out_dir: Path,
     min_length: int,
     max_seqs: int,
-    ortho_frac: float,
+    max_lost_frac: float,
+    max_multi_frac: float,
 ) -> tuple[int, int]:
-    """Write one <ref_cnee_id>_orthologs.fasta per ref CNEE that's one2one
-    in at least ortho_frac of columns, at least min_length bp long (by its
-    reference interval, not any query projection), and within the first
-    max_seqs such CNEEs in ref_ids order. min_length/max_seqs can be set to
-    0 to disable that bound. A qualifying CNEE's file always has the same
+    """Write one <ref_cnee_id>_orthologs.fasta per ref CNEE whose fraction of
+    columns categorized as lost (a reference-only category -- see
+    LOST_CATEGORIES) is <= max_lost_frac AND whose fraction categorized as
+    multi-projection (one2many/many2one/complex/many2many) is <=
+    max_multi_frac, at least min_length bp long (by its reference interval,
+    not any query projection), and within the first max_seqs such CNEEs in
+    ref_ids order. min_length/max_seqs can be set to 0 to disable that bound.
+    A qualifying CNEE's file always has the same
     N+1 records -- the reference sequence plus exactly one per column, in
     column order -- so every file lists the same set of species regardless
     of which ones were actually one2one for that CNEE. A column where it
@@ -265,10 +399,13 @@ def extract_one2one_orthologs(
     sequence couldn't actually be located/fetched, a data-consistency
     problem distinct from "not one2one in that column"."""
     n_columns = len(columns)
-    qualifying_refs = [
-        ref_id for ref_id in ref_ids
-        if sum(1 for col in columns if col.category_by_ref.get(ref_id) == "one2one") / n_columns >= ortho_frac
-    ]
+    qualifying_refs = []
+    for ref_id in ref_ids:
+        kinds = [_category_kind(col.category_by_ref.get(ref_id)) for col in columns]
+        lost_frac = kinds.count("lost") / n_columns
+        multi_frac = kinds.count("multi") / n_columns
+        if lost_frac <= max_lost_frac and multi_frac <= max_multi_frac:
+            qualifying_refs.append(ref_id)
     if not qualifying_refs:
         return 0, 0
 
@@ -296,8 +433,8 @@ def extract_one2one_orthologs(
         qualifying_refs = qualifying_refs[:max_seqs]
 
     print(
-        f"{len(qualifying_refs)} ref CNEE(s) are one2one in >= {ortho_frac:.0%} of "
-        f"{n_columns} sample(s); extracting FASTA...",
+        f"{len(qualifying_refs)} ref CNEE(s) have lost_frac <= {max_lost_frac:.0%} and "
+        f"multi_frac <= {max_multi_frac:.0%} across {n_columns} sample(s); extracting FASTA...",
         file=sys.stderr,
     )
 
@@ -418,47 +555,328 @@ def extract_one2one_orthologs(
     return written, len(failed_refs)
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
-        "--query-dirs",
-        required=True,
-        type=Path,
-        help=(
-            "Text file listing one toga4cnee output directory per line, optionally "
-            "with tab-separated columns for that run's query genome (FASTA/2bit, "
-            "required for FASTA extraction) and a manual species label"
-        ),
+def _run_summary_mode(args: argparse.Namespace) -> None:
+    run_dirs = _read_run_dirs(args.query_dirs)
+    if not run_dirs:
+        raise SystemExit(f"{args.query_dirs} lists no output directories")
+
+    columns = collect_cross_run_orthology(run_dirs, build_fasta_data=False)
+    if not columns:
+        raise SystemExit("No usable run directories found; nothing to write")
+
+    ref_ids = [interval.cnee_uid for interval in parse_bed(args.ref_bed)]
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = args.out_dir / f"{args.ref_prefix}_combined_orthology.tsv"
+    row_count = write_combined_orthology(ref_ids, columns, out_path)
+    print(f"Wrote {row_count} ref CNEE rows x {len(columns)} species -> {out_path}")
+
+    loss_path, multi_path = write_frequency_distribution_plots(ref_ids, columns, args.ref_prefix, args.out_dir)
+    print(f"Wrote loss frequency distribution -> {loss_path}")
+    print(f"Wrote multi-projection frequency distribution -> {multi_path}")
+
+
+def _run_sequence_mode(args: argparse.Namespace) -> None:
+    if not 0.0 <= args.max_lost_frac <= 1.0:
+        raise SystemExit(f"--max-lost-frac must be between 0 and 1 (got {args.max_lost_frac})")
+    if not 0.0 <= args.max_multi_frac <= 1.0:
+        raise SystemExit(f"--max-multi-frac must be between 0 and 1 (got {args.max_multi_frac})")
+
+    run_dirs = _read_run_dirs(args.query_dirs)
+    if not run_dirs:
+        raise SystemExit(f"{args.query_dirs} lists no output directories")
+
+    columns = collect_cross_run_orthology(run_dirs, build_fasta_data=True, require_ref_ortho_status=False)
+    if not columns:
+        raise SystemExit("No usable run directories found; nothing to write")
+
+    missing_genome = [str(col.run_dir) for col in columns if col.genome_path is None]
+    if missing_genome:
+        raise SystemExit(
+            "--query-dirs is missing a genome path (2nd column) for: "
+            f"{', '.join(missing_genome)} (required for FASTA extraction)"
+        )
+
+    per_label_categories = _read_combined_orthology_table(args.orthology_table)
+    for col in columns:
+        if col.label not in per_label_categories:
+            raise SystemExit(
+                f"{args.orthology_table} has no column for run {col.run_dir} (label {col.label!r}); "
+                "make sure --query-dirs is the same sample sheet (same run dirs/labels) used to "
+                "build this orthology table with `summary` mode"
+            )
+        col.category_by_ref = per_label_categories[col.label]
+
+    ref_intervals = parse_bed(args.ref_bed)
+    ref_ids = [interval.cnee_uid for interval in ref_intervals]
+    ref_coords_by_id = {interval.cnee_uid: (interval.chrom, interval.start, interval.end) for interval in ref_intervals}
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    written, skipped = extract_one2one_orthologs(
+        ref_ids, ref_coords_by_id, columns, args.ref_genome, args.ref_prefix, args.out_dir,
+        args.min_length, args.max_seqs, args.max_lost_frac, args.max_multi_frac,
     )
-    parser.add_argument(
+    skip_note = f" ({skipped} skipped)" if skipped else ""
+    print(
+        f"Wrote {written} ortholog FASTA file(s){skip_note} -> "
+        f"{args.out_dir / FASTA_SUBDIR_NAME}"
+    )
+
+
+@dataclass
+class TreeScaffold:
+    """Everything needed to compute Fritz & Purvis's D statistic on a fixed
+    tree topology, precomputed once (not re-derived per CNEE). Node "idx"
+    values are toytree's own node ids -- tips are idx 0..n_tips-1, matching
+    the row order of toytree.pcm.simulate_continuous_bm's output."""
+
+    tip_idx_by_label: dict[str, int]
+    postorder_internal: list[int]  # internal node idx, children before parents
+    children: dict[int, list[int]]  # internal node idx -> child idx list
+    edges: list[tuple[int, int]]  # (child_idx, parent_idx), every node but the root
+    n_tips: int
+
+
+def _build_tree_scaffold(tree) -> TreeScaffold:
+    tip_idx_by_label: dict[str, int] = {}
+    postorder_internal: list[int] = []
+    children: dict[int, list[int]] = {}
+    edges: list[tuple[int, int]] = []
+    for node in tree.traverse("postorder"):
+        if node.is_leaf():
+            tip_idx_by_label[node.name] = node.idx
+        else:
+            postorder_internal.append(node.idx)
+            children[node.idx] = [child.idx for child in node.children]
+        if node.up is not None:
+            edges.append((node.idx, node.up.idx))
+    return TreeScaffold(tip_idx_by_label, postorder_internal, children, edges, len(tip_idx_by_label))
+
+
+def _compute_d(tip_values: dict[int, float], scaffold: TreeScaffold) -> float:
+    # Fritz & Purvis's D: propagate tip values up as each internal node's
+    # (unweighted) mean of its children, then sum |child - parent| over
+    # every edge in the tree. Used identically for d(obs), each d(random)
+    # permutation, and each d(brownian) simulation -- only tip_values differ.
+    node_value = dict(tip_values)
+    for idx in scaffold.postorder_internal:
+        kids = scaffold.children[idx]
+        node_value[idx] = sum(node_value[k] for k in kids) / len(kids)
+    return sum(abs(node_value[child] - node_value[parent]) for child, parent in scaffold.edges)
+
+
+def _simulate_random_d_values(n_lost: int, scaffold: TreeScaffold, n_perms: int, rng) -> list[float]:
+    # Null distribution 1: no phylogenetic structure -- shuffle which tips
+    # are "lost" at random, keeping the same observed count of losses.
+    import numpy as np
+
+    tip_idxs = list(scaffold.tip_idx_by_label.values())
+    base = np.array([0.0] * n_lost + [1.0] * (scaffold.n_tips - n_lost))
+    values = []
+    for _ in range(n_perms):
+        shuffled = rng.permutation(base)
+        values.append(_compute_d(dict(zip(tip_idxs, shuffled)), scaffold))
+    return values
+
+
+def _simulate_brownian_d_values(
+    tree, n_lost: int, scaffold: TreeScaffold, n_perms: int, rng
+) -> list[float]:
+    # Null distribution 2: trait evolves under Brownian motion, then
+    # thresholded to binary at the quantile matching the OBSERVED prevalence
+    # (n_lost losses) -- not a fixed median -- so the null reflects what a
+    # trait this rare/common would look like under pure BM. One call
+    # simulates all n_perms replicates at once (one column each).
+    import numpy as np
+
+    seed = int(rng.integers(0, 2**32 - 1))
+    sim = tree.pcm.simulate_continuous_bm(rates=[1.0] * n_perms, tips_only=True, seed=seed)
+    tip_idxs = list(scaffold.tip_idx_by_label.values())
+    values = []
+    for column in sim.columns:
+        tip_continuous = sim[column].to_numpy()
+        lost_positions = np.argsort(tip_continuous)[:n_lost]
+        binary = np.ones(scaffold.n_tips)
+        binary[lost_positions] = 0.0
+        values.append(_compute_d(dict(zip(tip_idxs, binary)), scaffold))
+    return values
+
+
+def run_phylo_d_analysis(
+    orthology_table: Path,
+    tree_path: Path,
+    min_lost: int,
+    n_perms: int,
+    seed: int,
+):
+    import numpy as np
+    import pandas as pd
+    import toytree
+
+    tree = toytree.tree(str(tree_path))
+    scaffold = _build_tree_scaffold(tree)
+    tip_labels = list(scaffold.tip_idx_by_label.keys())
+
+    with Path(orthology_table).open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle, delimiter="\t")
+        header = next(reader)
+    if not header or header[0] != "ref_ID":
+        raise ValueError(
+            f"{orthology_table} does not look like a `summary`-mode combined orthology TSV "
+            "(expected 'ref_ID' as the first column)"
+        )
+    table_species = header[1:]
+    missing_tips = sorted(set(tip_labels) - set(table_species))
+    if missing_tips:
+        raise SystemExit(
+            f"Tree tip label(s) not found as columns in {orthology_table}: {', '.join(missing_tips)} "
+            "-- tree tip names must exactly match the species labels `summary` mode assigned"
+        )
+    species_column_index = {label: header.index(label) for label in tip_labels}
+
+    rng = np.random.default_rng(seed)
+    null_cache: dict[int, tuple[float, float]] = {}
+    rows: list[tuple[str, int, float]] = []
+    n_total = n_dropped_na = n_invariant = n_below_min_lost = 0
+
+    with Path(orthology_table).open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle, delimiter="\t")
+        next(reader)
+        for row in reader:
+            n_total += 1
+            ref_id = row[0]
+            tip_values: dict[int, float] = {}
+            n_lost = 0
+            has_na = False
+            for label in tip_labels:
+                category = row[species_column_index[label]]
+                if not category or category == "NA":
+                    has_na = True
+                    break
+                is_lost = _category_kind(category) == "lost"
+                tip_values[scaffold.tip_idx_by_label[label]] = 0.0 if is_lost else 1.0
+                n_lost += int(is_lost)
+            if has_na:
+                n_dropped_na += 1
+                continue
+            if n_lost == 0 or n_lost == scaffold.n_tips:
+                n_invariant += 1
+                continue
+            if n_lost < min_lost:
+                n_below_min_lost += 1
+                continue
+
+            d_obs = _compute_d(tip_values, scaffold)
+            if n_lost not in null_cache:
+                random_vals = _simulate_random_d_values(n_lost, scaffold, n_perms, rng)
+                brownian_vals = _simulate_brownian_d_values(tree, n_lost, scaffold, n_perms, rng)
+                null_cache[n_lost] = (float(np.mean(random_vals)), float(np.mean(brownian_vals)))
+            mean_random, mean_brownian = null_cache[n_lost]
+            denom = mean_random - mean_brownian
+            d_stat = (d_obs - mean_brownian) / denom if denom != 0 else float("nan")
+            rows.append((ref_id, n_lost, d_stat))
+
+    print(
+        f"{n_total} ref CNEEs read; {n_dropped_na} dropped (missing data), "
+        f"{n_invariant} skipped (invariant: lost in 0 or all {scaffold.n_tips} species), "
+        f"{n_below_min_lost} skipped (lost in fewer than --min-lost {min_lost} species); "
+        f"{len(rows)} D values computed across {len(null_cache)} distinct lost-count group(s)",
+        file=sys.stderr,
+    )
+    return pd.DataFrame(rows, columns=["ref_cnee_id", "n_lost", "D"])
+
+
+def write_phylo_d_density_plot(d_values, out_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.hist(d_values, bins=30, color="#1f6feb", edgecolor="white")
+    ax.axvline(0, color="#0e9594", linestyle="--", linewidth=1, label="D=0 (clumped, BM-like)")
+    ax.axvline(1, color="#c2410c", linestyle="--", linewidth=1, label="D=1 (random)")
+    ax.set_xlabel("D statistic")
+    ax.set_ylabel("Reference CNEEs")
+    ax.set_title(f"Phylogenetic signal of CNEE loss (n={len(d_values):,})")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def _run_cluster_mode(args: argparse.Namespace) -> None:
+    result = run_phylo_d_analysis(
+        args.orthology_table, args.tree, args.min_lost, args.n_perms, args.seed,
+    )
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = args.out_dir / f"{args.ref_prefix}_phylo_d.tsv"
+    result.to_csv(out_path, sep="\t", index=False)
+    print(f"Wrote {len(result)} D-statistic rows -> {out_path}")
+
+    valid = result["D"].dropna()
+    if len(valid):
+        fig_path = args.out_dir / "figures" / f"{args.ref_prefix}.phylo_d_density.png"
+        write_phylo_d_density_plot(valid.to_numpy(), fig_path)
+        print(f"Wrote D-statistic density plot ({len(valid)} finite values) -> {fig_path}")
+    else:
+        print("No finite D values to plot (every candidate CNEE had a degenerate null distribution)", file=sys.stderr)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+
+    query_dirs_help = (
+        "Text file listing one toga4cnee output directory per line, optionally "
+        "with tab-separated columns for that run's query genome (FASTA/2bit, "
+        "required for FASTA extraction) and a manual species label"
+    )
+    ref_prefix_help = (
+        "Label for the reference set: used both for the '<ref-prefix>_combined_orthology.tsv' "
+        "filename and as the reference sequence's FASTA header"
+    )
+    out_dir_help = "Directory to write output into [default: current directory]"
+
+    summary_parser = subparsers.add_parser(
+        "summary",
+        help="Build the combined per-species orthology-category TSV",
+        description="Build one combined TSV of per-reference-CNEE orthology category across samples.",
+    )
+    summary_parser.add_argument("--query-dirs", required=True, type=Path, help=query_dirs_help)
+    summary_parser.add_argument(
         "--ref-bed", required=True, type=Path, help="Reference CNEE BED3+ file used for every run"
     )
-    parser.add_argument(
-        "--ref-genome",
-        type=Path,
-        default=None,
-        help="Reference genome (FASTA/2bit); required unless --no-fasta is given",
+    summary_parser.add_argument("--ref-prefix", required=True, help=ref_prefix_help)
+    summary_parser.add_argument("--out-dir", type=Path, default=Path("."), help=out_dir_help)
+    summary_parser.set_defaults(func=_run_summary_mode)
+
+    sequence_parser = subparsers.add_parser(
+        "sequence",
+        help="Extract FASTA sequence for shared one2one orthologs",
+        description="Extract one <ref_cnee_id>_orthologs.fasta per ref CNEE that's one2one in enough samples.",
     )
-    parser.add_argument(
-        "--ref-prefix",
+    sequence_parser.add_argument("--query-dirs", required=True, type=Path, help=query_dirs_help)
+    sequence_parser.add_argument(
+        "--orthology-table",
         required=True,
+        type=Path,
         help=(
-            "Label for the reference set: used both for the '<ref-prefix>_combined_orthology.tsv' "
-            "filename and as the reference sequence's FASTA header"
+            "The '<ref-prefix>_combined_orthology.tsv' built by `summary` mode -- must come "
+            "from the same --query-dirs sample sheet (same run dirs/labels), since categories "
+            "are looked up by matching each run's label to that table's column header"
         ),
     )
-    parser.add_argument(
-        "--out-dir",
-        type=Path,
-        default=Path("."),
-        help="Directory to write output into [default: current directory]",
+    sequence_parser.add_argument(
+        "--ref-bed", required=True, type=Path, help="Reference CNEE BED3+ file used for every run"
     )
-    parser.add_argument(
-        "--no-fasta",
-        action="store_true",
-        help="Only write the combined orthology TSV; skip one2one FASTA extraction",
+    sequence_parser.add_argument(
+        "--ref-genome", required=True, type=Path, help="Reference genome (FASTA/2bit)"
     )
-    parser.add_argument(
+    sequence_parser.add_argument("--ref-prefix", required=True, help=ref_prefix_help)
+    sequence_parser.add_argument("--out-dir", type=Path, default=Path("."), help=out_dir_help)
+    sequence_parser.add_argument(
         "--min-length",
         type=int,
         default=40,
@@ -468,69 +886,93 @@ def main(argv: list[str] | None = None) -> None:
             "[default: 40]"
         ),
     )
-    parser.add_argument(
+    sequence_parser.add_argument(
         "--max-seqs",
         type=int,
-        default=100000,
+        default=300000,
         help=(
             "Maximum number of one2one ortholog FASTA files to write; 0 disables this cap "
-            "[default: 100000]"
+            "[default: 300000]"
         ),
     )
-    parser.add_argument(
-        "--ortho-frac",
+    sequence_parser.add_argument(
+        "--max-lost-frac",
         type=float,
-        default=0.9,
+        default=0.3,
         help=(
-            "Minimum fraction of samples a ref CNEE must be one2one in to be included in "
-            "FASTA extraction; samples where it isn't one2one simply have no sequence in "
-            "its output file. 1.0 requires one2one in every sample [default: 0.9]"
+            "Maximum fraction of samples a ref CNEE can be lost in (a reference-only "
+            "category -- unaligned/probable_loss/assembly_gap_loss/uncertain_loss/"
+            "missing-loss) and still be included in FASTA extraction [default: 0.3]"
         ),
     )
+    sequence_parser.add_argument(
+        "--max-multi-frac",
+        type=float,
+        default=0.1,
+        help=(
+            "Maximum fraction of samples a ref CNEE can be multi-projection in "
+            "(one2many/many2one/complex) and still be included in FASTA extraction "
+            "[default: 0.1]"
+        ),
+    )
+    sequence_parser.set_defaults(func=_run_sequence_mode)
+
+    cluster_parser = subparsers.add_parser(
+        "cluster",
+        help="Phylogenetic signal (Fritz & Purvis D) of CNEE loss across species",
+        description=(
+            "For each qualifying ref CNEE, compute the D statistic of phylogenetic signal "
+            "(Fritz & Purvis 2010) for its present/lost pattern across species on a tree."
+        ),
+    )
+    cluster_parser.add_argument(
+        "--orthology-table",
+        required=True,
+        type=Path,
+        help="The '<ref-prefix>_combined_orthology.tsv' built by `summary` mode",
+    )
+    cluster_parser.add_argument(
+        "--tree",
+        required=True,
+        type=Path,
+        help=(
+            "Phylogenetic tree of species in Newick format; tip labels must exactly match "
+            "the species labels used as columns in --orthology-table"
+        ),
+    )
+    cluster_parser.add_argument("--ref-prefix", required=True, help=ref_prefix_help)
+    cluster_parser.add_argument("--out-dir", type=Path, default=Path("."), help=out_dir_help)
+    cluster_parser.add_argument(
+        "--min-lost",
+        type=int,
+        default=3,
+        help=(
+            "Only compute D for a ref CNEE lost in at least this many species (it's always "
+            "skipped if lost in 0 or all species, since D is undefined for an invariant trait) "
+            "[default: 3]"
+        ),
+    )
+    cluster_parser.add_argument(
+        "--n-perms",
+        type=int,
+        default=10,
+        help=(
+            "Number of permutations/simulations per distinct lost-species-count group for each "
+            "of the two null distributions (random, Brownian motion) [default: 10]"
+        ),
+    )
+    cluster_parser.add_argument(
+        "--seed", type=int, default=0, help="Random seed, for reproducible permutations/simulations [default: 0]"
+    )
+    cluster_parser.set_defaults(func=_run_cluster_mode)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
     args = parser.parse_args(argv)
-
-    fasta_enabled = not args.no_fasta
-    if fasta_enabled and args.ref_genome is None:
-        raise SystemExit("--ref-genome is required unless --no-fasta is given")
-    if not 0.0 <= args.ortho_frac <= 1.0:
-        raise SystemExit(f"--ortho-frac must be between 0 and 1 (got {args.ortho_frac})")
-
-    run_dirs = _read_run_dirs(args.query_dirs)
-    if not run_dirs:
-        raise SystemExit(f"{args.query_dirs} lists no output directories")
-
-    columns = collect_cross_run_orthology(run_dirs, fasta_enabled)
-    if not columns:
-        raise SystemExit("No usable run directories found; nothing to write")
-
-    if fasta_enabled:
-        missing_genome = [str(col.run_dir) for col in columns if col.genome_path is None]
-        if missing_genome:
-            raise SystemExit(
-                "--query-dirs is missing a genome path (2nd column) for: "
-                f"{', '.join(missing_genome)} (required for FASTA extraction; "
-                "pass --no-fasta to skip it)"
-            )
-
-    ref_intervals = parse_bed(args.ref_bed)
-    ref_ids = [interval.cnee_uid for interval in ref_intervals]
-
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = args.out_dir / f"{args.ref_prefix}_combined_orthology.tsv"
-    row_count = write_combined_orthology(ref_ids, columns, out_path)
-    print(f"Wrote {row_count} ref CNEE rows x {len(columns)} species -> {out_path}")
-
-    if fasta_enabled:
-        ref_coords_by_id = {interval.cnee_uid: (interval.chrom, interval.start, interval.end) for interval in ref_intervals}
-        written, skipped = extract_one2one_orthologs(
-            ref_ids, ref_coords_by_id, columns, args.ref_genome, args.ref_prefix, args.out_dir,
-            args.min_length, args.max_seqs, args.ortho_frac,
-        )
-        skip_note = f" ({skipped} skipped)" if skipped else ""
-        print(
-            f"Wrote {written} ortholog FASTA file(s){skip_note} -> "
-            f"{args.out_dir / FASTA_SUBDIR_NAME}"
-        )
+    args.func(args)
 
 
 if __name__ == "__main__":

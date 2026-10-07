@@ -55,13 +55,13 @@ DEFAULT_EXTEND_GAP_SCORE = -1.0
 
 # Outcome labels, shared vocabulary with the exploratory scripts this was
 # validated against (exploratory_analysis/depth_and_score_filtering.py).
-DISCARDED_REPEAT_DRIVEN_DEPTH = "discarded_repeat_driven_depth"
+DISCARDED_REPEAT_DRIVEN_DEPTH = "high_depth"
 ACCEPTED_ISOLATED_WITH_FLANK_SUPPORT = "accepted_isolated_with_flank_support"
-REJECTED_ISOLATED_NO_FLANK_SUPPORT = "rejected_isolated_no_flank_support"
+REJECTED_ISOLATED_NO_FLANK_SUPPORT = "no_flank_support"
 ACCEPTED_CLEAR_CNEE_WINNER = "accepted_clear_cnee_winner"
-REJECTED_CNEE_CLEAR_LOSER = "rejected_cnee_clear_loser"
+REJECTED_CNEE_CLEAR_LOSER = "low_score"
 ACCEPTED_FLANK_TIEBREAK_WINNER = "accepted_flank_tiebreak_winner"
-REJECTED_FLANK_TIEBREAK_LOSER = "rejected_flank_tiebreak_loser"
+REJECTED_FLANK_TIEBREAK_LOSER = "low_flank_score"
 
 
 @dataclass(frozen=True)

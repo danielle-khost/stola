@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from .orthology import (
@@ -18,7 +19,7 @@ from .orthology import (
     DEFAULT_OPEN_GAP_SCORE,
     DEFAULT_QUERY_ID_PREFIX,
 )
-from .plots import write_qc_plots
+from .plots import write_aligned_block_depth_density, write_qc_plots
 from .summary import summarize_overlap_stats
 from .synteny import DEFAULT_FLANK_SIZES
 from .workflow import run_workflow
@@ -111,6 +112,30 @@ def _plot(args: argparse.Namespace) -> None:
         f"{result.sequence_identity_density_n} sequence-compared projections -> "
         f"{result.sequence_identity_density_path}"
     )
+
+
+def _chain_depth(args: argparse.Namespace) -> None:
+    # Compute per-base aligned-block depth across both genomes of a chain
+    # file and write the combined reference/query density SVG.
+    from .chain_depth import compute_aligned_block_depth_histograms, compute_depth_stats
+
+    result = compute_aligned_block_depth_histograms(args.chain_file)
+    print(f"{result.n_chains} chains, {result.n_blocks} aligned blocks")
+    ref_stats = compute_depth_stats(result.ref_histogram)
+    query_stats = compute_depth_stats(result.query_histogram)
+    print(f"Reference: {ref_stats}")
+    print(f"Query: {query_stats}")
+
+    plot_result = write_aligned_block_depth_density(
+        result.ref_histogram,
+        asdict(ref_stats),
+        result.query_histogram,
+        asdict(query_stats),
+        args.out,
+        chain_label=args.chain_file.name,
+        bin_max=args.bin_max,
+    )
+    print(f"Wrote aligned-block depth density plot -> {plot_result.path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -310,6 +335,20 @@ def build_parser() -> argparse.ArgumentParser:
     plot_parser.add_argument("--out-sequence-identity-density", required=True, type=Path)
     plot_parser.set_defaults(func=_plot)
 
+    chain_depth_parser = subparsers.add_parser(
+        "chain-depth",
+        help="Per-base aligned-block depth density plot for a chain file's ref/query genomes",
+    )
+    chain_depth_parser.add_argument("chain_file", type=Path, help="Input .chain or .chain.gz file")
+    chain_depth_parser.add_argument("--out", required=True, type=Path, help="Output SVG path")
+    chain_depth_parser.add_argument(
+        "--bin-max",
+        type=int,
+        default=100,
+        help="Collapse every depth above this into one overflow bin [default: 100]",
+    )
+    chain_depth_parser.set_defaults(func=_chain_depth)
+
     return parser
 
 
@@ -317,7 +356,7 @@ def main(argv: list[str] | None = None) -> None:
     # Parse CLI arguments, supporting bare run arguments as shorthand for run.
     if argv is None:
         argv = sys.argv[1:]
-    if argv and argv[0] not in {"run", "summarize", "plot", "-h", "--help"}:
+    if argv and argv[0] not in {"run", "summarize", "plot", "chain-depth", "-h", "--help"}:
         argv = ["run", *argv]
     parser = build_parser()
     args = parser.parse_args(argv)
