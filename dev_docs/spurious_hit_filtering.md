@@ -41,3 +41,48 @@ For each multi-proj CNEE
                         If flank align score of candidate > competitors, accept projection
                         Else discard projection
 ```
+
+## WIP
+FIXING HARD DEPTH FILTER BY IMPROVING ALGO EFFICIENCY:
+ok, i'm approaching this as two separate but related approaches:
+1. "(candidate, competitor)-based" vs "query locus-based" scope
+2. many2one algorithmic bias
+i want to focus on the first question first. keep this as exploratory for now, but structure it such that we can swap it into the actual pipeline easily. i think i do want to switch the logic to a "query locus based" approach, i.e. something like:
+```
+for each multi projection candidate;
+go thru each query locus;
+identify chains with aligned blocks overlapping the locus;
+for each chain, slice the sequence over query locus window and 10kb flanks;
+ calculate scores and relative scores;
+FOR NOW: use the existing relative scoring decision algorithm BUT no depth filter;
+```
+i'd like to try this (knowing that the many2one problem still exists) and see the effect, both on if recategorization changes and if this fixes the algorithm efficiency problem. give me a plan for this first before implementing.
+
+### Filtering algo options
+Modified sweepGA filtering algo:
+```
+for each query locus window:
+    get chains with aligned blocks overlapping CNEE 
+    slice chains to get CNEE window and 10kb flanks
+    local score slices: seq identity over CNEE x ln(aligned query bases)
+    sort slices by score
+    designate K highest scoring slices as "primary projections"
+    for all other slices:
+        discard projection if >=95% aligned based are contained with primary projections (any)
+```
+
+Modified relative scoring algo:
+```
+for each query locus window:
+    get chains with aligned blocks overlapping CNEE
+    soft depth filter: if aligned block depth over window > N (20):
+         sort chains by chain score
+         retain only the top N best-scoring chains
+    if query locus only covered by single chain:
+        retain if 50% flanking sequence is aligned
+    slice chains to get CNEE window and 10kb query flanks
+    get "local score" from slices: seq identity over CNEE x aligned base fraction
+    calc relative score for each slice: score / (score max scoring slice)
+    for each slice:
+        if relative score > 0.5, retain projection
+```

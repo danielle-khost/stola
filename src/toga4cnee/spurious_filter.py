@@ -1,67 +1,63 @@
-"""Depth/score spurious-hit filtering for multi-projection ref CNEEs.
+"""Relative-score spurious-hit filtering for multi-projection ref CNEEs.
 
-Replaces the old align_score/neighbor-synteny verification
-(see synteny.py's RefNeighborIndex/QueryNeighborIndex, still used
-independently by the exploratory synteny reports) for anything ambiguous --
-a ref CNEE with more than one candidate query locus, or more than one ref
-CNEE sharing a query locus.
+Applied to anything ambiguous -- a ref CNEE with more than one candidate
+query locus, or more than one ref CNEE sharing a query locus. Works per
+query LOCUS (the merged query span of the filtering-eligible projections
+landing there -- the "window"), scoring every chain aligned at that locus
+once and judging every candidate projection there against the same set:
 
-Per candidate projection, at its own query-side locus (query_start..query_end,
-already the aligned span from overlap_stats.tsv):
+1. Soft depth filter: chains whose query envelope overlaps the window are
+   ranked by their own genome-wide chain score (the chain header score, no
+   new computation), and their blocks parsed in that order, keeping the
+   first soft_depth_limit (default 20) that actually have aligned bases over
+   the window. A projection whose chain doesn't make that cut is rejected
+   without being scored (repeat-driven pileup). The scan visits at most
+   SCAN_CAP_MULTIPLIER x soft_depth_limit chains, so cost per locus stays
+   bounded even at pileups thousands of chains deep.
+2. Exactly one kept chain ("isolated"): accept iff the projection's own
+   flanks (flank_window each side, core excluded) have aligned-block
+   coverage from ANY chain above flank_any_coverage_threshold -- a real
+   ortholog's neighborhood is usually alignable even when this exact hit is
+   uncontested.
+3. Otherwise, each kept chain's local score = sequence identity over the
+   window (matches / aligned bases) x aligned fraction over the window plus
+   flank_window each side (aligned query bases / slice length; bases the
+   chain doesn't reach count as unaligned). Relative score R = local score /
+   best local score at the locus; a projection is retained iff
+   R > relative_score_threshold (default 0.5). Several chains can clear the
+   bar at one locus, so genuine many2one/one2many calls survive.
 
-1. locus_depth = 1 + (# other chains, genome-wide, whose own query envelope
-   overlaps this locus's core window extended by flank_window on each side).
-   locus_depth >= depth_filter_max: reject outright (repeat-driven pileup).
-2. locus_depth == 1 (no competing chain at all): accept iff the surrounding
-   flanks (flank_window each side, core excluded) have aligned-block coverage
-   from ANY chain (not just this one) above flank_any_coverage_threshold --
-   a real ortholog's neighborhood is usually alignable even when this exact
-   hit is uncontested; reject otherwise.
-3. Otherwise (real competition, not a pileup): score this projection's own
-   chain and every competitor's own chain over the core window (arithmetic
-   match/mismatch/affine-gap score -- see score_window_for_chain), normalize
-   by the locus's best score, and accept immediately if this projection is
-   the (tied-)best and every competitor is well behind (R < cnee_r_threshold).
-   Reject immediately if this projection itself is well behind
-   (R < cnee_r_threshold). Otherwise the race is close: fall back to the
-   same score computed over the two flanking windows (raw, not normalized;
-   "missing" coverage counts as a gap run), accepting only if this
-   projection's flank score beats every competitor's.
-
-The "genome-wide chain search" and vectorized block parsing here are what
-made a full-dataset validation run (140,579 candidate rows) complete in
-~90s rather than the ~80 minutes a naive per-line chain.py-style parse would
-take -- see parse_query_blocks_vectorized's docstring.
+The vectorized block parsing here is what keeps a genome-wide run fast --
+see parse_query_blocks_vectorized's docstring.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, Sequence
 
 import numpy as np
 
 from .models import ChainBlock, ChainRecord
 from .sequence_compare import AlignedSegment
 
-DEFAULT_DEPTH_FILTER_MAX = 20
+DEFAULT_SOFT_DEPTH_LIMIT = 20
 DEFAULT_FLANK_WINDOW = 10_000
 DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD = 0.5
-DEFAULT_CNEE_R_THRESHOLD = 0.7
-DEFAULT_MATCH_SCORE = 1.0
-DEFAULT_MISMATCH_SCORE = -1.0
-DEFAULT_OPEN_GAP_SCORE = -5.0
-DEFAULT_EXTEND_GAP_SCORE = -1.0
+DEFAULT_RELATIVE_SCORE_THRESHOLD = 0.5
+# score_locus parses at most this many x soft_depth_limit chains per locus
+# (in chain-score order) while looking for soft_depth_limit chains with
+# aligned bases over the window.
+SCAN_CAP_MULTIPLIER = 10
 
-# Outcome labels, shared vocabulary with the exploratory scripts this was
-# validated against (exploratory_analysis/depth_and_score_filtering.py).
-DISCARDED_REPEAT_DRIVEN_DEPTH = "high_depth"
+# Outcome labels (pruned_query_projections.tsv's rejection_reason column).
+REJECTED_HIGH_DEPTH_LOW_CHAIN_RANK = "high_depth_low_chain_rank"
 ACCEPTED_ISOLATED_WITH_FLANK_SUPPORT = "accepted_isolated_with_flank_support"
 REJECTED_ISOLATED_NO_FLANK_SUPPORT = "no_flank_support"
-ACCEPTED_CLEAR_CNEE_WINNER = "accepted_clear_cnee_winner"
-REJECTED_CNEE_CLEAR_LOSER = "low_score"
-ACCEPTED_FLANK_TIEBREAK_WINNER = "accepted_flank_tiebreak_winner"
-REJECTED_FLANK_TIEBREAK_LOSER = "low_flank_score"
+ACCEPTED_RELATIVE_SCORE = "accepted_relative_score"
+REJECTED_LOW_RELATIVE_SCORE = "low_relative_score"
+REJECTED_ZERO_LOCUS_SCORE = "zero_locus_score"
 
 
 @dataclass(frozen=True)
@@ -73,13 +69,15 @@ class QueryBlocks:
     ref_starts: np.ndarray
     ref_ends: np.ndarray
 
-    def overlapping(self, start: int, end: int) -> list[ChainBlock]:
+    def _overlap_range(self, start: int, end: int) -> tuple[int, int]:
         if end <= start or self.query_starts.size == 0:
-            return []
+            return 0, 0
         lo = int(np.searchsorted(self.query_ends, start, side="right"))
         hi = int(np.searchsorted(self.query_starts, end, side="left"))
-        if hi <= lo:
-            return []
+        return lo, max(lo, hi)
+
+    def overlapping(self, start: int, end: int) -> list[ChainBlock]:
+        lo, hi = self._overlap_range(start, end)
         return [
             ChainBlock(
                 ref_start=int(self.ref_starts[i]), ref_end=int(self.ref_ends[i]),
@@ -87,6 +85,15 @@ class QueryBlocks:
             )
             for i in range(lo, hi)
         ]
+
+    def aligned_bases(self, start: int, end: int) -> int:
+        """Query bases in [start, end) covered by this chain's aligned blocks."""
+        lo, hi = self._overlap_range(start, end)
+        if hi <= lo:
+            return 0
+        clipped_starts = np.maximum(self.query_starts[lo:hi], start)
+        clipped_ends = np.minimum(self.query_ends[lo:hi], end)
+        return int(np.clip(clipped_ends - clipped_starts, 0, None).sum())
 
 
 def parse_query_blocks_vectorized(header_fields: list[str], body_lines: list[str]) -> QueryBlocks:
@@ -185,36 +192,22 @@ class ChainEnvelopeCache:
 
 
 def build_query_envelopes(records: list[ChainRecord]) -> dict[str, dict[str, np.ndarray]]:
-    """Per-query-chromosome chain envelope arrays, for cheap overlap search."""
-    by_chrom: dict[str, list[tuple[int, int, str]]] = {}
+    """Per-query-chromosome chain envelope and chain-score arrays, for cheap overlap search."""
+    by_chrom: dict[str, list[tuple[int, int, str, int]]] = {}
     for record in records:
         by_chrom.setdefault(record.query_chrom, []).append(
-            (record.query_start, record.query_end, record.chain_id)
+            (record.query_start, record.query_end, record.chain_id, record.score)
         )
     envelopes: dict[str, dict[str, np.ndarray]] = {}
     for chrom, rows in by_chrom.items():
-        starts, ends, chain_ids = zip(*rows)
+        starts, ends, chain_ids, scores = zip(*rows)
         envelopes[chrom] = {
             "starts": np.array(starts, dtype=np.int64),
             "ends": np.array(ends, dtype=np.int64),
             "chain_ids": np.array(chain_ids),
+            "scores": np.array(scores, dtype=np.int64),
         }
     return envelopes
-
-
-def find_competitor_ids(
-    query_chrom: str, own_chain_id: str, window_start: int, window_end: int,
-    envelopes: dict[str, dict[str, np.ndarray]],
-) -> list[str]:
-    envelope = envelopes.get(query_chrom)
-    if envelope is None:
-        return []
-    mask = (
-        (envelope["starts"] < window_end)
-        & (envelope["ends"] > window_start)
-        & (envelope["chain_ids"] != own_chain_id)
-    )
-    return [str(cid) for cid in envelope["chain_ids"][mask]]
 
 
 def aligned_segments_for_query_interval(
@@ -251,46 +244,16 @@ def aligned_segments_for_query_interval(
     return segments
 
 
-def gap_run_lengths(covered_spans: list[tuple[int, int]], window_start: int, window_end: int) -> list[int]:
-    """Lengths of maximal uncovered sub-intervals of [window_start, window_end)."""
-    ordered = sorted(covered_spans)
-    runs: list[int] = []
-    cursor = window_start
-    for start, end in ordered:
-        if start > cursor:
-            runs.append(start - cursor)
-        cursor = max(cursor, end)
-    if window_end > cursor:
-        runs.append(window_end - cursor)
-    return runs
-
-
-def affine_gap_penalty(run_lengths: list[int], open_gap_score: float, extend_gap_score: float) -> float:
-    return sum(
-        open_gap_score + (length - 1) * extend_gap_score for length in run_lengths if length > 0
-    )
-
-
-def score_window_for_chain(
+def window_matches_for_chain(
     ref_accessor, query_accessor, ref_chrom: str, query_chrom: str, query_strand: str,
-    window_start: int, window_end: int, blocks: list[ChainBlock],
-    match_score: float, mismatch_score: float, open_gap_score: float, extend_gap_score: float,
-) -> float:
-    """Arithmetic match/mismatch/affine-gap score for one chain over one query-anchored window.
-
-    Every window base not covered by one of this chain's own blocks --
-    whether an internal chain gap, or the chain simply not reaching that far
-    -- becomes part of a gap run. Floored at 0 (a heavily gapped/mismatched
-    chain reads as "no real signal here" rather than an arbitrarily negative
-    number), mirroring the local-alignment convention of resetting a
-    score that would go negative.
-    """
-    if window_end <= window_start:
-        return 0.0
-
-    segments = aligned_segments_for_query_interval(blocks, window_start, window_end, query_strand)
+    blocks: QueryBlocks, window_start: int, window_end: int,
+) -> tuple[int, int]:
+    """(matches, compared bases) of one chain's aligned blocks over a query window."""
+    segments = aligned_segments_for_query_interval(
+        blocks.overlapping(window_start, window_end), window_start, window_end, query_strand
+    )
     if not segments:
-        return max(0.0, affine_gap_penalty([window_end - window_start], open_gap_score, extend_gap_score))
+        return 0, 0
 
     try:
         from Bio.Seq import Seq
@@ -300,8 +263,7 @@ def score_window_for_chain(
         ) from exc
 
     total_matches = 0
-    total_mismatches = 0
-    covered_spans: list[tuple[int, int]] = []
+    total_compared = 0
     for segment in segments:
         ref_part = ref_accessor.fetch(ref_chrom, segment.ref_start, segment.ref_end)
         query_part = query_accessor.fetch(query_chrom, segment.query_start, segment.query_end)
@@ -312,18 +274,9 @@ def score_window_for_chain(
             continue
         ref_arr = np.frombuffer(ref_part[:compared].encode("ascii"), dtype=np.uint8)
         query_arr = np.frombuffer(query_part[:compared].encode("ascii"), dtype=np.uint8)
-        matches = int(np.count_nonzero(ref_arr == query_arr))
-        total_matches += matches
-        total_mismatches += compared - matches
-        covered_spans.append((segment.query_start, segment.query_start + compared))
-
-    gap_runs = gap_run_lengths(covered_spans, window_start, window_end)
-    raw_score = (
-        total_matches * match_score
-        + total_mismatches * mismatch_score
-        + affine_gap_penalty(gap_runs, open_gap_score, extend_gap_score)
-    )
-    return max(0.0, raw_score)
+        total_matches += int(np.count_nonzero(ref_arr == query_arr))
+        total_compared += compared
+    return total_matches, total_compared
 
 
 def any_chain_flank_coverage(
@@ -357,132 +310,179 @@ def any_chain_flank_coverage(
     return covered / total_window
 
 
+class LocusProjection(Protocol):
+    """What the filter needs from a candidate projection (see orthology.Projection)."""
+
+    chain_id: str
+    query_chrom: str
+    query_start: int
+    query_end: int
+
+
+@dataclass(frozen=True)
+class SliceScore:
+    """One kept chain's alignment over a locus window and its flanks."""
+
+    chain_id: str
+    chain_score: int
+    window_aligned_bases: int
+    window_matches: int
+    slice_aligned_bases: int
+
+
+@dataclass
+class LocusScores:
+    query_chrom: str
+    window_start: int
+    window_end: int
+    slice_start: int
+    slice_end: int
+    envelope_depth: int  # chains whose query envelope overlaps the window
+    slices: list[SliceScore]  # kept chains, best chain score first
+    # Only for isolated loci (exactly one slice): per locus projection (same
+    # order), its any-chain flank coverage, or None if it isn't on the kept chain.
+    isolated_flank_coverage: list[float | None] | None = None
+
+    def local_score(self, slice_score: SliceScore) -> float:
+        identity = (
+            slice_score.window_matches / slice_score.window_aligned_bases
+            if slice_score.window_aligned_bases else 0.0
+        )
+        slice_len = self.slice_end - self.slice_start
+        aligned_fraction = slice_score.slice_aligned_bases / slice_len if slice_len > 0 else 0.0
+        return identity * aligned_fraction
+
+
+def score_locus(
+    locus_projections: Sequence[LocusProjection],
+    records_by_id: dict[str, ChainRecord],
+    envelopes: dict[str, dict[str, np.ndarray]],
+    cache: ChainEnvelopeCache,
+    ref_accessor,
+    query_accessor,
+    flank_window: int = DEFAULT_FLANK_WINDOW,
+    soft_depth_limit: int = DEFAULT_SOFT_DEPTH_LIMIT,
+) -> LocusScores:
+    """Score every chain aligned over one query locus (see module docstring, steps 1-3)."""
+    query_chrom = locus_projections[0].query_chrom
+    window_start = min(p.query_start for p in locus_projections)
+    window_end = max(p.query_end for p in locus_projections)
+    query_size = records_by_id[locus_projections[0].chain_id].query_size
+    slice_start = max(0, window_start - flank_window)
+    slice_end = min(query_size, window_end + flank_window)
+
+    envelope = envelopes[query_chrom]
+    mask = (envelope["starts"] < window_end) & (envelope["ends"] > window_start)
+    hit_ids = envelope["chain_ids"][mask]
+    neg_scores = -envelope["scores"][mask]
+    envelope_depth = int(hit_ids.size)
+
+    # Only the top scan_cap by chain score can ever be visited, so partition
+    # first instead of fully sorting a possibly ~10^5-long array; then order
+    # by descending chain score, ties broken by envelope order.
+    scan_cap = SCAN_CAP_MULTIPLIER * soft_depth_limit
+    if envelope_depth > scan_cap:
+        candidates = np.argpartition(neg_scores, scan_cap - 1)[:scan_cap]
+    else:
+        candidates = np.arange(envelope_depth)
+    order = candidates[np.lexsort((candidates, neg_scores[candidates]))]
+
+    slices: list[SliceScore] = []
+    for idx in order:
+        if len(slices) >= soft_depth_limit:
+            break
+        record, blocks = cache.get(str(hit_ids[idx]))
+        if blocks.aligned_bases(window_start, window_end) == 0:
+            continue
+        matches, compared = window_matches_for_chain(
+            ref_accessor, query_accessor, record.ref_chrom, query_chrom, record.query_strand,
+            blocks, window_start, window_end,
+        )
+        slices.append(SliceScore(
+            chain_id=record.chain_id, chain_score=record.score,
+            window_aligned_bases=compared, window_matches=matches,
+            slice_aligned_bases=blocks.aligned_bases(slice_start, slice_end),
+        ))
+
+    scores = LocusScores(
+        query_chrom=query_chrom, window_start=window_start, window_end=window_end,
+        slice_start=slice_start, slice_end=slice_end, envelope_depth=envelope_depth, slices=slices,
+    )
+    if len(slices) == 1:
+        only_chain_id = slices[0].chain_id
+        coverages: list[float | None] = []
+        for p in locus_projections:
+            if p.chain_id != only_chain_id:
+                coverages.append(None)
+                continue
+            coverages.append(any_chain_flank_coverage(
+                query_chrom, p.chain_id,
+                max(0, p.query_start - flank_window), p.query_start,
+                p.query_end, min(query_size, p.query_end + flank_window),
+                envelopes, cache,
+            ))
+        scores.isolated_flank_coverage = coverages
+    return scores
+
+
 @dataclass(frozen=True)
 class ProjectionVerdict:
     accepted: bool
-    branch: str  # "depth_filtered" | "isolated" | "competing"
+    branch: str  # "soft_depth_filtered" | "isolated" | "competing"
     outcome: str
     locus_depth: int
     n_competing_chains: int
-    own_cnee_score: float | None = None
-    best_competitor_cnee_score: float | None = None
-    r_own_cnee: float | None = None
-    r_best_competitor_cnee: float | None = None
-    own_flank_score: float | None = None
-    best_competitor_flank_score: float | None = None
+    local_score: float | None = None
+    best_competitor_local_score: float | None = None
+    relative_score: float | None = None
     flank_any_coverage: float | None = None
 
 
-def classify_projection(
-    chain_id: str, query_chrom: str, query_start: int, query_end: int, ref_chrom: str,
-    records_by_id: dict[str, ChainRecord], envelopes: dict[str, dict[str, np.ndarray]],
-    cache: ChainEnvelopeCache, ref_accessor, query_accessor,
-    flank_window: int = DEFAULT_FLANK_WINDOW,
-    depth_filter_max: int = DEFAULT_DEPTH_FILTER_MAX,
+def decide_locus(
+    locus_projections: Sequence[LocusProjection],
+    scores: LocusScores,
+    relative_score_threshold: float = DEFAULT_RELATIVE_SCORE_THRESHOLD,
     flank_any_coverage_threshold: float = DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
-    cnee_r_threshold: float = DEFAULT_CNEE_R_THRESHOLD,
-    match_score: float = DEFAULT_MATCH_SCORE,
-    mismatch_score: float = DEFAULT_MISMATCH_SCORE,
-    open_gap_score: float = DEFAULT_OPEN_GAP_SCORE,
-    extend_gap_score: float = DEFAULT_EXTEND_GAP_SCORE,
-) -> ProjectionVerdict:
-    """Accept/reject one candidate projection using its own query-side locus."""
-    record = records_by_id[chain_id]
-    locus_window_start = max(0, query_start - flank_window)
-    locus_window_end = min(record.query_size, query_end + flank_window)
+) -> list[ProjectionVerdict]:
+    """One verdict per entry in locus_projections (same order), from score_locus's output."""
+    n_kept = len(scores.slices)
+    local_by_chain = {s.chain_id: scores.local_score(s) for s in scores.slices}
+    s_max = max(local_by_chain.values(), default=0.0)
 
-    competitor_ids = find_competitor_ids(query_chrom, chain_id, locus_window_start, locus_window_end, envelopes)
-    n_competing_chains = len(competitor_ids)
-    locus_depth = n_competing_chains + 1
+    verdicts: list[ProjectionVerdict] = []
+    for i, p in enumerate(locus_projections):
+        if p.chain_id not in local_by_chain:
+            verdicts.append(ProjectionVerdict(
+                accepted=False, branch="soft_depth_filtered", outcome=REJECTED_HIGH_DEPTH_LOW_CHAIN_RANK,
+                locus_depth=scores.envelope_depth, n_competing_chains=n_kept,
+            ))
+            continue
 
-    if depth_filter_max and locus_depth >= depth_filter_max:
-        return ProjectionVerdict(
-            accepted=False, branch="depth_filtered", outcome=DISCARDED_REPEAT_DRIVEN_DEPTH,
-            locus_depth=locus_depth, n_competing_chains=n_competing_chains,
-        )
+        if n_kept == 1:
+            coverage = scores.isolated_flank_coverage[i]
+            accepted = coverage > flank_any_coverage_threshold
+            verdicts.append(ProjectionVerdict(
+                accepted=accepted, branch="isolated",
+                outcome=ACCEPTED_ISOLATED_WITH_FLANK_SUPPORT if accepted else REJECTED_ISOLATED_NO_FLANK_SUPPORT,
+                locus_depth=scores.envelope_depth, n_competing_chains=0, flank_any_coverage=coverage,
+            ))
+            continue
 
-    if n_competing_chains == 0:
-        upstream_start, upstream_end = max(0, query_start - flank_window), query_start
-        downstream_start, downstream_end = query_end, min(record.query_size, query_end + flank_window)
-        coverage = any_chain_flank_coverage(
-            query_chrom, chain_id, upstream_start, upstream_end, downstream_start, downstream_end,
-            envelopes, cache,
-        )
-        accepted = coverage > flank_any_coverage_threshold
-        return ProjectionVerdict(
-            accepted=accepted, branch="isolated",
-            outcome=ACCEPTED_ISOLATED_WITH_FLANK_SUPPORT if accepted else REJECTED_ISOLATED_NO_FLANK_SUPPORT,
-            locus_depth=locus_depth, n_competing_chains=n_competing_chains, flank_any_coverage=coverage,
-        )
-
-    _, own_blocks = cache.get(chain_id)
-    own_cnee_score = score_window_for_chain(
-        ref_accessor, query_accessor, ref_chrom, query_chrom, record.query_strand,
-        query_start, query_end, own_blocks.overlapping(query_start, query_end),
-        match_score, mismatch_score, open_gap_score, extend_gap_score,
-    )
-    competitor_cnee_scores: dict[str, float] = {}
-    for competitor_id in competitor_ids:
-        comp_record, comp_blocks = cache.get(competitor_id)
-        competitor_cnee_scores[competitor_id] = score_window_for_chain(
-            ref_accessor, query_accessor, comp_record.ref_chrom, query_chrom, comp_record.query_strand,
-            query_start, query_end, comp_blocks.overlapping(query_start, query_end),
-            match_score, mismatch_score, open_gap_score, extend_gap_score,
-        )
-    best_competitor_cnee_score = max(competitor_cnee_scores.values())
-
-    s_max = max(own_cnee_score, best_competitor_cnee_score)
-    if s_max > 0:
-        r_own = own_cnee_score / s_max
-        r_best_competitor = best_competitor_cnee_score / s_max
-        if r_own >= 1.0 and r_best_competitor < cnee_r_threshold:
-            return ProjectionVerdict(
-                accepted=True, branch="competing", outcome=ACCEPTED_CLEAR_CNEE_WINNER,
-                locus_depth=locus_depth, n_competing_chains=n_competing_chains,
-                own_cnee_score=own_cnee_score, best_competitor_cnee_score=best_competitor_cnee_score,
-                r_own_cnee=r_own, r_best_competitor_cnee=r_best_competitor,
-            )
-        if r_own < cnee_r_threshold:
-            return ProjectionVerdict(
-                accepted=False, branch="competing", outcome=REJECTED_CNEE_CLEAR_LOSER,
-                locus_depth=locus_depth, n_competing_chains=n_competing_chains,
-                own_cnee_score=own_cnee_score, best_competitor_cnee_score=best_competitor_cnee_score,
-                r_own_cnee=r_own, r_best_competitor_cnee=r_best_competitor,
-            )
-        # else: too close to call from the CNEE score alone -- fall through
-        # to the flank tiebreak below. (r_own/r_best_competitor still
-        # reported in the returned verdict for auditability.)
-    else:
-        r_own = r_best_competitor = None
-
-    upstream_start, upstream_end = max(0, query_start - flank_window), query_start
-    downstream_start, downstream_end = query_end, min(record.query_size, query_end + flank_window)
-
-    def flank_score_for(ref_chrom_: str, query_strand: str, blocks: QueryBlocks) -> float:
-        return (
-            score_window_for_chain(
-                ref_accessor, query_accessor, ref_chrom_, query_chrom, query_strand,
-                upstream_start, upstream_end, blocks.overlapping(upstream_start, upstream_end),
-                match_score, mismatch_score, open_gap_score, extend_gap_score,
-            )
-            + score_window_for_chain(
-                ref_accessor, query_accessor, ref_chrom_, query_chrom, query_strand,
-                downstream_start, downstream_end, blocks.overlapping(downstream_start, downstream_end),
-                match_score, mismatch_score, open_gap_score, extend_gap_score,
-            )
-        )
-
-    own_flank_score = flank_score_for(ref_chrom, record.query_strand, own_blocks)
-    best_competitor_flank_score = max(
-        flank_score_for(records_by_id[cid].ref_chrom, records_by_id[cid].query_strand, cache.get(cid)[1])
-        for cid in competitor_ids
-    )
-    accepted = own_flank_score > best_competitor_flank_score
-    return ProjectionVerdict(
-        accepted=accepted, branch="competing",
-        outcome=ACCEPTED_FLANK_TIEBREAK_WINNER if accepted else REJECTED_FLANK_TIEBREAK_LOSER,
-        locus_depth=locus_depth, n_competing_chains=n_competing_chains,
-        own_cnee_score=own_cnee_score, best_competitor_cnee_score=best_competitor_cnee_score,
-        r_own_cnee=r_own, r_best_competitor_cnee=r_best_competitor,
-        own_flank_score=own_flank_score, best_competitor_flank_score=best_competitor_flank_score,
-    )
+        own = local_by_chain[p.chain_id]
+        best_other = max(v for cid, v in local_by_chain.items() if cid != p.chain_id)
+        if s_max <= 0:
+            verdicts.append(ProjectionVerdict(
+                accepted=False, branch="competing", outcome=REJECTED_ZERO_LOCUS_SCORE,
+                locus_depth=scores.envelope_depth, n_competing_chains=n_kept - 1,
+                local_score=own, best_competitor_local_score=best_other,
+            ))
+            continue
+        relative = own / s_max
+        accepted = relative > relative_score_threshold
+        verdicts.append(ProjectionVerdict(
+            accepted=accepted, branch="competing",
+            outcome=ACCEPTED_RELATIVE_SCORE if accepted else REJECTED_LOW_RELATIVE_SCORE,
+            locus_depth=scores.envelope_depth, n_competing_chains=n_kept - 1,
+            local_score=own, best_competitor_local_score=best_other, relative_score=relative,
+        ))
+    return verdicts

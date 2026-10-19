@@ -150,6 +150,56 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle, delimiter="\t"))
 
 
+def _classify_with_filtering(
+    tmp_path: Path,
+    bed_text: str,
+    chain_lines: list[str],
+    ref_records: dict[str, str],
+    query_records: dict[str, str],
+    **classify_kwargs,
+):
+    # Real index -> candidates -> overlap stats -> classify_orthology chain,
+    # with multi-projection filtering on. Returns (result, query orthology
+    # rows, pruned-projection rows).
+    from toga4cnee.orthology import classify_orthology
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    bed = tmp_path / "cnees.bed"
+    chain = tmp_path / "test.chain"
+    index = tmp_path / "index.json"
+    candidates = tmp_path / "candidates.tsv"
+    stats = tmp_path / "stats.tsv"
+    orthology = tmp_path / "orthology.tsv"
+    query_bed = tmp_path / "query.bed"
+    culled = tmp_path / "culled.tsv"
+    ref_fasta = tmp_path / "ref.fa"
+    query_fasta = tmp_path / "query.fa"
+
+    bed.write_text(bed_text, encoding="utf-8")
+    chain.write_text("\n".join(chain_lines), encoding="utf-8")
+    _write_fasta(ref_fasta, ref_records)
+    _write_fasta(query_fasta, query_records)
+    build_index(chain, index)
+    write_candidates(index, bed, candidates)
+    comparator = SequenceComparator(ref_fasta, query_fasta, tmp_path / "work")
+    try:
+        write_overlap_stats(index, candidates, stats, sequence_comparator=comparator)
+        result = classify_orthology(
+            stats,
+            bed,
+            index,
+            orthology,
+            query_bed,
+            sequence_comparator=comparator,
+            filter_multi_projections=True,
+            out_culled_projections=culled,
+            **classify_kwargs,
+        )
+    finally:
+        comparator.close()
+    return result, _read_tsv(orthology), _read_tsv(culled)
+
+
 class WorkflowTests(unittest.TestCase):
     def test_build_index_records_byte_offsets_and_extractable_plain_chain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -818,85 +868,47 @@ class WorkflowTests(unittest.TestCase):
         query_ids = {row["query_cnee_id"] for row in rows}
         self.assertEqual(query_ids, {"aphWoo_CNEE_A"})
 
-    def test_depth_score_filtering_resolves_one2many_to_one2one_by_rejecting_worse_candidate(
+    def test_relative_score_filtering_resolves_one2many_to_one2one_by_rejecting_worse_candidate(
         self,
     ) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
 
+        # A single ref CNEE, MULTI = chr1:100-150, with two candidate
+        # chains -- an initial one2many shape:
+        #   chain 1: chr1[50,250) <-> chrQ1[50,250), a perfect match
+        #     throughout. No other chain ever touches chrQ1, so its locus is
+        #     isolated; its own chain extends 50bp past the CNEE core on both
+        #     sides, giving full flank coverage from itself -- accepted.
+        #   chain 2: chr1[80,220) <-> chrQ2[80,220), a total mismatch
+        #     throughout (chr1 is all "A", chrQ2 is all "T"). chain 3
+        #     (chr2[500,650) <-> chrQ2[100,250), all "T" on both sides -- a
+        #     perfect match) is NOT a candidate for any CNEE (chr2 has no ref
+        #     CNEE at all) but it aligns over chain 2's locus on chrQ2, so it
+        #     competes there. Over the locus slice chrQ2[50,200), chain 3's
+        #     local score is identity 1.0 x aligned fraction 100/150, chain
+        #     2's is identity 0 x anything = 0 -- relative score 0, rejected.
+        # After filtering, MULTI should have exactly one surviving
+        # projection (chain 1) and resolve from one2many down to one2one.
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            bed = tmp_path / "cnees.bed"
-            chain = tmp_path / "test.chain"
-            index = tmp_path / "index.json"
-            candidates = tmp_path / "candidates.tsv"
-            stats = tmp_path / "stats.tsv"
-            orthology = tmp_path / "orthology.tsv"
-            query_bed = tmp_path / "query.bed"
-            culled = tmp_path / "culled.tsv"
-            ref_fasta = tmp_path / "ref.fa"
-            query_fasta = tmp_path / "query.fa"
-
-            # A single ref CNEE, MULTI = chr1:100-150, with two candidate
-            # chains -- an initial one2many shape:
-            #   chain 1: chr1[50,250) <-> chrQ1[50,250), a perfect match
-            #     throughout. No other chain ever touches chrQ1, so its own
-            #     locus is "isolated" (depth==1); its own chain extends 50bp
-            #     past the CNEE core on both sides, giving full flank
-            #     coverage from itself -- it should be accepted.
-            #   chain 2: chr1[80,220) <-> chrQ2[80,220), a total mismatch
-            #     throughout (chr1 is all "A", chrQ2 is all "T"). chain 3
-            #     (chr2[500,650) <-> chrQ2[100,250), all "T" on both sides --
-            #     a perfect match) is NOT a candidate for any CNEE (chr2 has
-            #     no ref CNEE at all) but its query envelope overlaps chain
-            #     2's own locus on chrQ2, so it's a genuine genome-wide
-            #     "competing chain": chain 2 scores far worse than chain 3
-            #     at MULTI's core window and should be rejected outright.
-            # After filtering, MULTI should have exactly one surviving
-            # projection (chain 1) and resolve from one2many down to a plain
-            # one2one call.
-            bed.write_text("chr1\t100\t150\tMULTI\n", encoding="utf-8")
-            chain.write_text(
-                "\n".join(
-                    [
-                        "chain 100 chr1 300 + 50 250 chrQ1 300 + 50 250 1",
-                        "200",
-                        "",
-                        "chain 100 chr1 300 + 80 220 chrQ2 300 + 80 220 2",
-                        "140",
-                        "",
-                        "chain 100 chr2 700 + 500 650 chrQ2 300 + 100 250 3",
-                        "150",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
+            result, orthology_rows, culled_rows = _classify_with_filtering(
+                Path(tmpdir),
+                "chr1\t100\t150\tMULTI\n",
+                [
+                    "chain 100 chr1 300 + 50 250 chrQ1 300 + 50 250 1",
+                    "200",
+                    "",
+                    "chain 100 chr1 300 + 80 220 chrQ2 300 + 80 220 2",
+                    "140",
+                    "",
+                    "chain 100 chr2 700 + 500 650 chrQ2 300 + 100 250 3",
+                    "150",
+                    "",
+                ],
+                {"chr1": "A" * 300, "chr2": "T" * 700},
+                {"chrQ1": "A" * 300, "chrQ2": "T" * 300},
+                flank_window=50,
             )
-            _write_fasta(ref_fasta, {"chr1": "A" * 300, "chr2": "T" * 700})
-            _write_fasta(query_fasta, {"chrQ1": "A" * 300, "chrQ2": "T" * 300})
-
-            build_index(chain, index)
-            write_candidates(index, bed, candidates)
-            comparator = SequenceComparator(ref_fasta, query_fasta, tmp_path / "work")
-            try:
-                write_overlap_stats(index, candidates, stats, sequence_comparator=comparator)
-
-                result = classify_orthology(
-                    stats,
-                    bed,
-                    index,
-                    orthology,
-                    query_bed,
-                    sequence_comparator=comparator,
-                    filter_multi_projections=True,
-                    flank_window=50,
-                    out_culled_projections=culled,
-                )
-            finally:
-                comparator.close()
-            orthology_rows = _read_tsv(orthology)
-            culled_rows = _read_tsv(culled)
 
         categories_by_query = {
             row["query_cnee_id"]: row["orthology_category"] for row in orthology_rows
@@ -910,14 +922,94 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(culled_row["ref_cnee_id"], "MULTI")
         self.assertEqual(culled_row["query_chrom"], "chrQ2")
         self.assertEqual(culled_row["initial_orthology_category"], "one2many")
-        self.assertEqual(culled_row["rejection_reason"], "low_score")
+        self.assertEqual(culled_row["rejection_reason"], "low_relative_score")
         self.assertEqual(culled_row["locus_depth"], "2")
-        # Raw score (50 mismatches * -1 = -50) is floored at 0 -- a
-        # net-negative window reads as "no real signal" rather than an
-        # arbitrarily negative number.
-        self.assertEqual(float(culled_row["own_cnee_score"]), 0.0)
-        self.assertEqual(float(culled_row["best_competitor_cnee_score"]), 50.0)
+        self.assertEqual(float(culled_row["local_score"]), 0.0)
+        self.assertAlmostEqual(float(culled_row["best_competitor_local_score"]), 100 / 150)
+        self.assertEqual(float(culled_row["relative_score"]), 0.0)
+        self.assertEqual(culled_row["flank_any_coverage"], ".")
         self.assertEqual(float(culled_row["sequence_identity"]), 0.0)
+
+    def test_relative_score_filtering_keeps_many2one_when_chains_score_alike(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+
+        # Two ref CNEEs on different ref chromosomes, each carried by its own
+        # chain onto the SAME query locus chrQ[100,150) with identical
+        # alignment (perfect match over chrQ[50,250)). Both chains score the
+        # same at that locus (relative score 1.0 each), so both projections
+        # survive and the locus stays a many2one call -- a single winner per
+        # locus is not forced.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, orthology_rows, culled_rows = _classify_with_filtering(
+                Path(tmpdir),
+                "chr1\t100\t150\tREF_A\nchr2\t100\t150\tREF_B\n",
+                [
+                    "chain 100 chr1 300 + 50 250 chrQ 300 + 50 250 1",
+                    "200",
+                    "",
+                    "chain 100 chr2 300 + 50 250 chrQ 300 + 50 250 2",
+                    "200",
+                    "",
+                ],
+                {"chr1": "A" * 300, "chr2": "A" * 300},
+                {"chrQ": "A" * 300},
+                flank_window=50,
+            )
+
+        self.assertEqual(result.culled_projection_rows, 0)
+        self.assertEqual(culled_rows, [])
+        self.assertEqual(len(orthology_rows), 1)
+        self.assertEqual(orthology_rows[0]["orthology_category"], "many2one")
+        self.assertEqual(sorted(orthology_rows[0]["partner_ref_cnees"].split(",")), ["REF_A", "REF_B"])
+
+    def test_soft_depth_limit_rejects_chain_outside_top_chain_scores(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+
+        # MULTI = chr1:100-150 has two candidate chains: chain 1 onto an
+        # isolated, well-supported chrQ1 locus, and chain 2 (chain score 100)
+        # onto chrQ2[100,150), where chain 3 (chain score 500, not a
+        # candidate for any CNEE) also aligns. Everything is a perfect
+        # match, and chain 2 covers more of the chrQ2 slice than chain 3, so
+        # with the default soft_depth_limit chain 2 is the best chain there
+        # and MULTI stays one2many. With soft_depth_limit=1 only chain 3 (the
+        # higher chain score) is kept at chrQ2, so chain 2's projection is
+        # rejected without being scored and MULTI resolves to one2one.
+        inputs = (
+            "chr1\t100\t150\tMULTI\n",
+            [
+                "chain 100 chr1 300 + 50 250 chrQ1 300 + 50 250 1",
+                "200",
+                "",
+                "chain 100 chr1 300 + 80 220 chrQ2 300 + 80 220 2",
+                "140",
+                "",
+                "chain 500 chr2 700 + 500 650 chrQ2 300 + 100 250 3",
+                "150",
+                "",
+            ],
+            {"chr1": "A" * 300, "chr2": "A" * 700},
+            {"chrQ1": "A" * 300, "chrQ2": "A" * 300},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, default_rows, default_culled = _classify_with_filtering(
+                Path(tmpdir) / "default", *inputs, flank_window=50
+            )
+            _, limited_rows, limited_culled = _classify_with_filtering(
+                Path(tmpdir) / "limited", *inputs, flank_window=50, soft_depth_limit=1
+            )
+
+        self.assertEqual({row["orthology_category"] for row in default_rows}, {"one2many"})
+        self.assertEqual(default_culled, [])
+
+        self.assertEqual([row["orthology_category"] for row in limited_rows], ["one2one"])
+        self.assertEqual(len(limited_culled), 1)
+        culled_row = limited_culled[0]
+        self.assertEqual(culled_row["query_chrom"], "chrQ2")
+        self.assertEqual(culled_row["rejection_reason"], "high_depth_low_chain_rank")
+        self.assertEqual(culled_row["locus_depth"], "2")
+        self.assertEqual(culled_row["local_score"], ".")
 
     def test_ref_cnee_tsv_splits_lost_by_query_assembly_gap_overlap(self) -> None:
         if not _has_networkx():
@@ -1284,7 +1376,7 @@ class WorkflowTests(unittest.TestCase):
             from toga4cnee.orthology import classify_orthology
 
             # This test is about write_synteny_verification's own flank-size
-            # behavior, not depth/score filtering -- CNEE_PARTIAL's one2many
+            # behavior, not multi-projection filtering -- CNEE_PARTIAL's one2many
             # shape would otherwise need a real sequence_comparator.
             classify_orthology(stats, bed, index, orthology, query_bed, filter_multi_projections=False)
 

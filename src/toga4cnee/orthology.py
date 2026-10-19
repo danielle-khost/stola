@@ -1,4 +1,4 @@
-"""Graph-based CNEE orthology classification with depth/score filtering."""
+"""Graph-based CNEE orthology classification with relative-score filtering."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 from .assembly_gaps import DEFAULT_MIN_GAP_LENGTH, NRunIndex, scan_query_assembly_gaps
 from .bed import parse_bed
@@ -16,17 +17,14 @@ from .models import ChainRecord
 from .sequence_compare import SequenceComparator
 from .spurious_filter import (
     ChainEnvelopeCache,
-    DEFAULT_CNEE_R_THRESHOLD,
-    DEFAULT_DEPTH_FILTER_MAX,
-    DEFAULT_EXTEND_GAP_SCORE,
     DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
     DEFAULT_FLANK_WINDOW,
-    DEFAULT_MATCH_SCORE,
-    DEFAULT_MISMATCH_SCORE,
-    DEFAULT_OPEN_GAP_SCORE,
+    DEFAULT_RELATIVE_SCORE_THRESHOLD,
+    DEFAULT_SOFT_DEPTH_LIMIT,
     ProjectionVerdict,
     build_query_envelopes,
-    classify_projection,
+    decide_locus,
+    score_locus,
 )
 from .synteny import BlockIndex, _flanking_blocks
 
@@ -49,8 +47,10 @@ CULLED_PROJECTION_COLUMNS = [
     "gap_fraction",
     "rejection_reason",
     "locus_depth",
-    "own_cnee_score",
-    "best_competitor_cnee_score",
+    "local_score",
+    "best_competitor_local_score",
+    "relative_score",
+    "flank_any_coverage",
 ]
 
 REF_CNEE_COLUMNS = [
@@ -174,14 +174,10 @@ def classify_orthology(
     out_query_bed: str | Path,
     sequence_comparator: SequenceComparator | None = None,
     filter_multi_projections: bool = True,
-    depth_filter_max: int = DEFAULT_DEPTH_FILTER_MAX,
-    cnee_r_threshold: float = DEFAULT_CNEE_R_THRESHOLD,
+    soft_depth_limit: int = DEFAULT_SOFT_DEPTH_LIMIT,
+    relative_score_threshold: float = DEFAULT_RELATIVE_SCORE_THRESHOLD,
     flank_window: int = DEFAULT_FLANK_WINDOW,
     flank_any_coverage_threshold: float = DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
-    match_score: float = DEFAULT_MATCH_SCORE,
-    mismatch_score: float = DEFAULT_MISMATCH_SCORE,
-    open_gap_score: float = DEFAULT_OPEN_GAP_SCORE,
-    extend_gap_score: float = DEFAULT_EXTEND_GAP_SCORE,
     out_culled_projections: str | Path | None = None,
     query_fasta: str | Path | None = None,
     min_gap_length: int = DEFAULT_MIN_GAP_LENGTH,
@@ -199,21 +195,21 @@ def classify_orthology(
     "lost" refs (zero aligned query bases) are never part of this graph at
     all, so they are never subject to filtering either.
 
-    Filtering (see spurious_filter.py) is per individual candidate
-    projection, at its own query-side locus:
-      - locus_depth (1 + # other chains genome-wide whose own query envelope
-        overlaps this locus, extended by flank_window each side) >=
-        depth_filter_max: reject outright (repeat-driven pileup).
-      - locus_depth == 1 (no competing chain at all): accept iff the
-        surrounding flanks have aligned-block coverage from ANY chain above
-        flank_any_coverage_threshold.
-      - otherwise: score this projection's own chain and every competing
-        chain's own chain over the locus core window (arithmetic
-        match/mismatch/affine-gap score), normalize by the locus's best
-        score, and accept/reject outright if this projection is clearly
-        best/worst (R >= cnee_r_threshold apart); otherwise fall back to the
-        same score over the flanking windows (raw, not normalized), accepting
-        only if this projection's flank score beats every competitor's.
+    Filtering (see spurious_filter.py) works per query locus -- the merged
+    query span of the eligible projections landing there -- scoring every
+    chain aligned at that locus once:
+      - soft depth filter: of the chains whose query span overlaps the
+        locus, keep the soft_depth_limit best by chain score that actually
+        have aligned bases over it; a projection on any other chain is
+        rejected (repeat-driven pileup).
+      - exactly one kept chain: accept iff the projection's flanks
+        (flank_window each side) have aligned-block coverage from ANY chain
+        above flank_any_coverage_threshold.
+      - otherwise: local score = sequence identity over the locus x aligned
+        fraction over the locus plus flank_window each side; accept iff
+        this projection's chain scores above relative_score_threshold
+        relative to the locus's best chain. Several chains can pass at one
+        locus, so many2one/one2many calls can survive filtering.
 
     filter_multi_projections=True requires sequence_comparator (real ref/
     query genome sequence access is needed to score candidates).
@@ -243,6 +239,8 @@ def classify_orthology(
     if query_id_prefix doesn't already end with one, so "aphWoo" and
     "aphWoo_" both produce ids like "aphWoo_ce1234".
     """
+    if filter_multi_projections and soft_depth_limit < 1:
+        raise ValueError("soft_depth_limit must be at least 1")
     if query_id_prefix and not query_id_prefix.endswith("_"):
         query_id_prefix = f"{query_id_prefix}_"
     try:
@@ -288,14 +286,10 @@ def classify_orthology(
                 chain_records,
                 indexed_chain_path,
                 sequence_comparator,
-                depth_filter_max,
-                cnee_r_threshold,
+                soft_depth_limit,
+                relative_score_threshold,
                 flank_window,
                 flank_any_coverage_threshold,
-                match_score,
-                mismatch_score,
-                open_gap_score,
-                extend_gap_score,
             )
         else:
             surviving = list(evidence.projections)
@@ -418,38 +412,48 @@ def _read_projection_evidence(stats_path: str | Path) -> ProjectionEvidence:
     )
 
 
-def _cluster_query_projections(projections: list[Projection]) -> list[QueryCluster]:
-    # Merge overlapping query-side projections into provisional query CNEE
-    # loci. Grouping by (chrom, strand) first ensures overlapping projections
-    # on opposite strands are never merged into the same query locus.
+def _iter_overlapping_projection_groups(projections: list[Projection]) -> Iterator[list[Projection]]:
+    # Merge overlapping query-side projections into query loci. Grouping by
+    # (chrom, strand) first ensures overlapping projections on opposite
+    # strands are never merged into the same query locus.
     by_group: dict[tuple[str, str], list[Projection]] = defaultdict(list)
     for projection in projections:
         by_group[(projection.query_chrom, projection.query_strand)].append(projection)
 
-    clusters: list[QueryCluster] = []
     for group_key in sorted(by_group):
-        chrom = group_key[0]
-        current: QueryCluster | None = None
+        current: list[Projection] = []
+        current_end = 0
         for projection in sorted(
             by_group[group_key],
             key=lambda item: (item.query_start, item.query_end, item.ref_id),
         ):
-            if current is None or projection.query_start >= current.end:
-                if current is not None:
-                    clusters.append(current)
-                current = QueryCluster(
-                    node_id=f"query:{len(clusters) + 1:06d}",
-                    chrom=chrom,
-                    start=projection.query_start,
-                    end=projection.query_end,
-                )
-            current.end = max(current.end, projection.query_end)
-            current.strands.add(projection.query_strand)
-            current.refs.add(projection.ref_id)
-            _add_cluster_edge_metrics(current, projection)
-            current.projection_count += 1
-        if current is not None:
-            clusters.append(current)
+            if current and projection.query_start >= current_end:
+                yield current
+                current = []
+            if not current:
+                current_end = projection.query_end
+            current.append(projection)
+            current_end = max(current_end, projection.query_end)
+        if current:
+            yield current
+
+
+def _cluster_query_projections(projections: list[Projection]) -> list[QueryCluster]:
+    # Provisional query CNEE loci, one per group of overlapping projections.
+    clusters: list[QueryCluster] = []
+    for group in _iter_overlapping_projection_groups(projections):
+        cluster = QueryCluster(
+            node_id=f"query:{len(clusters) + 1:06d}",
+            chrom=group[0].query_chrom,
+            start=group[0].query_start,
+            end=max(projection.query_end for projection in group),
+        )
+        for projection in group:
+            cluster.strands.add(projection.query_strand)
+            cluster.refs.add(projection.ref_id)
+            _add_cluster_edge_metrics(cluster, projection)
+            cluster.projection_count += 1
+        clusters.append(cluster)
     return clusters
 
 
@@ -478,11 +482,11 @@ def _build_orthology_graph(nx, ref_ids: list[str], clusters: list[QueryCluster])
 
 
 # --------------------------------------------------------------------------
-# Depth/score filtering: applied only to projections belonging to a ref CNEE
-# whose initial graph shape is ambiguous (one2many/many2one/complex/
+# Relative-score filtering: applied only to projections belonging to a ref
+# CNEE whose initial graph shape is ambiguous (one2many/many2one/complex/
 # many2many). A lone ref/query edge is never filtered -- it is always
-# reported as "one2one" (see spurious_filter.py for the per-projection
-# decision tree itself).
+# reported as "one2one" (see spurious_filter.py for the per-locus decision
+# itself).
 # --------------------------------------------------------------------------
 
 
@@ -517,55 +521,51 @@ def _filter_multi_projections(
     chain_records: list[ChainRecord],
     indexed_chain_path: str | Path,
     sequence_comparator: SequenceComparator,
-    depth_filter_max: int,
-    cnee_r_threshold: float,
+    soft_depth_limit: int,
+    relative_score_threshold: float,
     flank_window: int,
     flank_any_coverage_threshold: float,
-    match_score: float,
-    mismatch_score: float,
-    open_gap_score: float,
-    extend_gap_score: float,
 ) -> tuple[list[Projection], list[CulledProjection]]:
     records_by_id = {record.chain_id: record for record in chain_records}
     envelopes = build_query_envelopes(chain_records)
     cache = ChainEnvelopeCache(indexed_chain_path, records_by_id)
     try:
         surviving: list[Projection] = []
-        culled: list[CulledProjection] = []
+        eligible: list[Projection] = []
         for projection in projections:
-            category = initial_category_by_ref.get(projection.ref_id)
-            if category is None:
-                surviving.append(projection)
-                continue
-            record = records_by_id[projection.chain_id]
-            verdict = classify_projection(
-                chain_id=projection.chain_id,
-                query_chrom=projection.query_chrom,
-                query_start=projection.query_start,
-                query_end=projection.query_end,
-                ref_chrom=record.ref_chrom,
-                records_by_id=records_by_id,
-                envelopes=envelopes,
-                cache=cache,
-                ref_accessor=sequence_comparator.ref,
-                query_accessor=sequence_comparator.query,
-                flank_window=flank_window,
-                depth_filter_max=depth_filter_max,
-                flank_any_coverage_threshold=flank_any_coverage_threshold,
-                cnee_r_threshold=cnee_r_threshold,
-                match_score=match_score,
-                mismatch_score=mismatch_score,
-                open_gap_score=open_gap_score,
-                extend_gap_score=extend_gap_score,
-            )
-            if verdict.accepted:
-                surviving.append(projection)
+            if projection.ref_id in initial_category_by_ref:
+                eligible.append(projection)
             else:
-                culled.append(
-                    CulledProjection(
-                        projection=projection, initial_orthology_category=category, verdict=verdict
+                surviving.append(projection)
+
+        culled: list[CulledProjection] = []
+        # Every eligible projection sharing a query locus is judged against
+        # the same set of chains, scored once at that locus.
+        for locus_projections in _iter_overlapping_projection_groups(eligible):
+            scores = score_locus(
+                locus_projections,
+                records_by_id,
+                envelopes,
+                cache,
+                sequence_comparator.ref,
+                sequence_comparator.query,
+                flank_window,
+                soft_depth_limit,
+            )
+            verdicts = decide_locus(
+                locus_projections, scores, relative_score_threshold, flank_any_coverage_threshold
+            )
+            for projection, verdict in zip(locus_projections, verdicts):
+                if verdict.accepted:
+                    surviving.append(projection)
+                else:
+                    culled.append(
+                        CulledProjection(
+                            projection=projection,
+                            initial_orthology_category=initial_category_by_ref[projection.ref_id],
+                            verdict=verdict,
+                        )
                     )
-                )
         return surviving, culled
     finally:
         cache.close()
@@ -811,14 +811,12 @@ def _write_culled_projections_tsv(culled: list[CulledProjection], out_path: str 
                     "gap_fraction": projection.fraction_gap,
                     "rejection_reason": verdict.outcome if verdict else ".",
                     "locus_depth": verdict.locus_depth if verdict else ".",
-                    "own_cnee_score": (
-                        "." if verdict is None or verdict.own_cnee_score is None else verdict.own_cnee_score
+                    "local_score": _optional_verdict_value(verdict, "local_score"),
+                    "best_competitor_local_score": _optional_verdict_value(
+                        verdict, "best_competitor_local_score"
                     ),
-                    "best_competitor_cnee_score": (
-                        "."
-                        if verdict is None or verdict.best_competitor_cnee_score is None
-                        else verdict.best_competitor_cnee_score
-                    ),
+                    "relative_score": _optional_verdict_value(verdict, "relative_score"),
+                    "flank_any_coverage": _optional_verdict_value(verdict, "flank_any_coverage"),
                 }
             )
             count += 1
@@ -926,3 +924,9 @@ def _parse_optional_float(value: str) -> float | None:
     if value == "." or value == "":
         return None
     return float(value)
+
+
+def _optional_verdict_value(verdict: ProjectionVerdict | None, field_name: str) -> float | str:
+    # A verdict metric for TSV output, or "." when that branch never computed it.
+    value = None if verdict is None else getattr(verdict, field_name)
+    return "." if value is None else value

@@ -41,6 +41,19 @@ Be sure that the naming conventions match between the chain, BED and genome file
 
 `--query_prefix`: the prefix (e.g. species ID) to add to each query CNEE ID. Defaults to `q`, e.g. `q_ce1234`.
 
+#### Multi-projection filtering
+Projections of ref CNEEs with more than one candidate (one2many, many2one, complex) are filtered per query locus: every chain aligned there gets a local score (sequence identity over the locus x aligned fraction over the locus plus flanks), and a projection is kept if its chain scores above a fraction of the best chain at that locus.
+
+`--relative-score-threshold`: minimum fraction of the locus's best local score needed to keep a projection (default `0.5`)
+
+`--soft-depth-limit`: number of chains scored per locus, taking the best by chain score; projections on any other chain are pruned as repeat-driven pileups (default `20`)
+
+`--flank-window`: flank size (bp, each side) included in the aligned fraction (default `10000`)
+
+`--flank-any-coverage-threshold`: at loci where only one chain aligns, the minimum fraction of the projection's flanks that must be aligned by any chain (default `0.5`)
+
+`--no-filter-multi-projections`: skip this filtering step entirely
+
 
 ## Pipeline overview
 

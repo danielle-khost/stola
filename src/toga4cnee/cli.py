@@ -8,16 +8,12 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .orthology import (
-    DEFAULT_CNEE_R_THRESHOLD,
-    DEFAULT_DEPTH_FILTER_MAX,
-    DEFAULT_EXTEND_GAP_SCORE,
     DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
     DEFAULT_FLANK_WINDOW,
-    DEFAULT_MATCH_SCORE,
     DEFAULT_MIN_GAP_LENGTH,
-    DEFAULT_MISMATCH_SCORE,
-    DEFAULT_OPEN_GAP_SCORE,
     DEFAULT_QUERY_ID_PREFIX,
+    DEFAULT_RELATIVE_SCORE_THRESHOLD,
+    DEFAULT_SOFT_DEPTH_LIMIT,
 )
 from .plots import write_aligned_block_depth_density, write_qc_plots
 from .summary import summarize_overlap_stats
@@ -39,14 +35,10 @@ def _run(args: argparse.Namespace) -> None:
         min_sequence_identity=args.min_sequence_identity,
         max_fraction_gap=args.max_fraction_gap,
         filter_multi_projections=not args.no_filter_multi_projections,
-        depth_filter_max=args.depth_filter_max,
-        cnee_r_threshold=args.cnee_r_threshold,
+        soft_depth_limit=args.soft_depth_limit,
+        relative_score_threshold=args.relative_score_threshold,
         flank_window=args.flank_window,
         flank_any_coverage_threshold=args.flank_any_coverage_threshold,
-        match_score=args.match_score,
-        mismatch_score=args.mismatch_score,
-        open_gap_score=args.open_gap_score,
-        extend_gap_score=args.extend_gap_score,
         min_gap_length=args.min_gap_length,
     )
     print(f"Indexed {result.chain_count} chains")
@@ -221,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-filter-multi-projections",
         action="store_true",
         help=(
-            "Skip depth/score filtering of multi-projection orthology edges "
+            "Skip relative-score filtering of multi-projection orthology edges "
             "(any edge in a one2many/many2one/complex component). A lone "
             "ref/query edge is never filtered either way. Categories are "
             "still assigned from the unfiltered graph, just without the "
@@ -229,25 +221,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_parser.add_argument(
-        "--depth-filter-max",
+        "--soft-depth-limit",
         type=int,
-        default=DEFAULT_DEPTH_FILTER_MAX,
+        default=DEFAULT_SOFT_DEPTH_LIMIT,
         help=(
-            "Reject a candidate projection outright if its query locus has "
-            "this many or more chains (genome-wide) overlapping it -- reads "
-            f"as a repeat-driven pileup [default: {DEFAULT_DEPTH_FILTER_MAX}]"
+            "At each query locus, score only this many chains with aligned "
+            "bases there, taking the best by chain score; a projection on any "
+            "other chain is rejected as part of a repeat-driven pileup "
+            f"[default: {DEFAULT_SOFT_DEPTH_LIMIT}]"
         ),
     )
     run_parser.add_argument(
-        "--cnee-r-threshold",
+        "--relative-score-threshold",
         type=float,
-        default=DEFAULT_CNEE_R_THRESHOLD,
+        default=DEFAULT_RELATIVE_SCORE_THRESHOLD,
         help=(
-            "R = this candidate's own-locus score / the best score (this "
-            "candidate or any competitor) at that locus. R below this value "
-            "rejects outright; this candidate at R=1 with every competitor "
-            "below this value accepts outright; anything else falls back to "
-            f"a flank-score tiebreak [default: {DEFAULT_CNEE_R_THRESHOLD}]"
+            "Keep a projection if its chain's local score (sequence identity "
+            "over the locus x aligned fraction over the locus and its flanks) "
+            "is above this fraction of the best chain's local score at that "
+            f"locus [default: {DEFAULT_RELATIVE_SCORE_THRESHOLD}]"
         ),
     )
     run_parser.add_argument(
@@ -255,8 +247,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_FLANK_WINDOW,
         help=(
-            "Query-side flank size (bases each side) used both for the "
-            f"depth/competitor search and the flank-score tiebreak [default: {DEFAULT_FLANK_WINDOW}]"
+            "Query-side flank size (bases each side) included in each chain's "
+            f"aligned fraction, and checked at single-chain loci [default: {DEFAULT_FLANK_WINDOW}]"
         ),
     )
     run_parser.add_argument(
@@ -264,34 +256,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
         help=(
-            "For a candidate with no competing chain at all (locus_depth == 1): "
-            "minimum fraction of its flanks that must have aligned-block "
-            f"coverage from ANY chain to accept it [default: {DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD}]"
+            "At a locus where only one chain aligns: minimum fraction of the "
+            "projection's flanks that must have aligned-block coverage from "
+            f"ANY chain to accept it [default: {DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD}]"
         ),
-    )
-    run_parser.add_argument(
-        "--match-score",
-        type=float,
-        default=DEFAULT_MATCH_SCORE,
-        help=f"Per-base match score for the depth/score filter's arithmetic alignment score [default: {DEFAULT_MATCH_SCORE}]",
-    )
-    run_parser.add_argument(
-        "--mismatch-score",
-        type=float,
-        default=DEFAULT_MISMATCH_SCORE,
-        help=f"Per-base mismatch score for the depth/score filter's arithmetic alignment score [default: {DEFAULT_MISMATCH_SCORE}]",
-    )
-    run_parser.add_argument(
-        "--open-gap-score",
-        type=float,
-        default=DEFAULT_OPEN_GAP_SCORE,
-        help=f"Gap-open score for the depth/score filter's arithmetic alignment score [default: {DEFAULT_OPEN_GAP_SCORE}]",
-    )
-    run_parser.add_argument(
-        "--extend-gap-score",
-        type=float,
-        default=DEFAULT_EXTEND_GAP_SCORE,
-        help=f"Gap-extend score for the depth/score filter's arithmetic alignment score [default: {DEFAULT_EXTEND_GAP_SCORE}]",
     )
     run_parser.add_argument(
         "--min-gap-length",

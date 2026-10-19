@@ -9,19 +9,24 @@ exposed as output columns (see Output) rather than gated on them, so
 filtering can happen post-hoc if desired.
 
 Anything with more than one candidate projection -- one2many, many2one, or
-complex/many2many by initial graph shape -- goes through per-projection
-depth/score filtering: see `spurious_hit_filtering.md` for the full
-algorithm (`toga4cnee.spurious_filter`, wired into
+complex/many2many by initial graph shape -- goes through relative-score
+filtering ("Modified relative scoring algo" in `spurious_hit_filtering.md`;
+`toga4cnee.spurious_filter`, wired into
 `toga4cnee.orthology.classify_orthology` as `filter_multi_projections`).
-Briefly, per candidate projection at its own query-side locus:
-- `locus_depth` (1 + # other chains genome-wide overlapping that locus) at
-  or above a threshold (default 20) rejects it outright as repeat-driven.
-- `locus_depth == 1` (no competing chain at all) accepts it only if its
-  surrounding flanks have real aligned-block coverage from ANY chain.
-- Otherwise, its own arithmetic alignment score at the locus core is
-  compared against every competing chain's, normalized by the locus's best
-  score; a clear winner/loser resolves immediately, a close call falls back
-  to comparing flank scores instead.
+It works per query locus (the merged query span of the eligible
+projections landing there), scoring every chain aligned at that locus once:
+- Soft depth filter: of the chains overlapping the locus, only the top 20
+  (`--soft-depth-limit`) by chain score that actually have aligned bases
+  there are scored; a projection on any other chain is pruned as
+  repeat-driven (`high_depth_low_chain_rank`).
+- If only one chain aligns there, its projection is kept only if its
+  surrounding flanks have real aligned-block coverage from ANY chain
+  (`no_flank_support` otherwise).
+- Otherwise, each chain's local score = sequence identity over the locus x
+  aligned fraction over the locus plus 10kb flanks each side; a projection
+  is kept if its chain's score is > 0.5 (`--relative-score-threshold`) of
+  the best chain's at that locus (`low_relative_score` otherwise). Several
+  chains can pass at one locus, so many2one calls can survive filtering.
 
 # Orthology categories:
 ## Ref CNEE categories
@@ -40,7 +45,7 @@ Briefly, per candidate projection at its own query-side locus:
 - one2many: single copy in ref, multicopy in query; query projections pass filtering criteria
 - many2one: multiple ref CNEEs align to same query locus; ref alignments pass filtering criteria
 - complex: complex cases where multiple ref CNEEs overlap multiple the same query loci
-- pruned: query projection fails depth/score filtering
+- pruned: query projection fails relative-score filtering
 
 ## Loss sub-categorization (implemented)
 Whether a chain gap is a contig boundary is inferred from the query FASTA
@@ -77,7 +82,7 @@ labels.
   connected component: a lone ref/query edge needs no filtering at all; a
   ref with multiple query edges, multiple refs sharing one query edge, or a
   larger many-to-many component are all "multi-projection" and go through
-  the depth/score filtering described above (see Filtering criteria) before
+  the relative-score filtering described above (see Filtering criteria) before
   the graph is re-clustered from the surviving projections.
 - for each query node (in the post-filtering graph):
   - get connected ref nodes
@@ -132,7 +137,7 @@ M -- "No" --> L
 ```
 
 # Orthology flowchart v3
-Per-projection depth/score filtering (see Filtering criteria and
+Per-locus relative-score filtering (see Filtering criteria and
 `spurious_hit_filtering.md`) runs on every ref CNEE in an ambiguous
 (one2many/many2one/complex) component before the graph is re-clustered and
 final categories are assigned from the surviving edges; a lone ref/query
