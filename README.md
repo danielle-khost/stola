@@ -3,15 +3,28 @@ Development repo for toga-like annotations of CNEEs
 
 ## Installation
 
-### Prerequisites 
-*Dedicated conda environment TBD*
-For now, the pipeline and its dependencies are installed via `pip`:
+### Conda (recommended)
+toga4cnee is packaged for conda (a bioconda release is planned). Until then, build the package from a checkout and install it into its own environment:
 
 ```
 git clone https://github.com/danielle-khost/toga4cnee.git
-
 cd toga4cnee
-pip install .
+
+conda create -n conda-build -c conda-forge conda-build
+conda run -n conda-build conda build recipe -c conda-forge -c bioconda --output-folder dist/conda
+
+conda create -n toga4cnee -c ./dist/conda -c conda-forge -c bioconda toga4cnee
+conda activate toga4cnee
+```
+
+This installs the `toga4cnee` pipeline and the `toga4cnee-compare-cross-orthology` utility, with all of their dependencies.
+
+### pip
+For development, install from a checkout with `pip` instead:
+
+```
+pip install .              # core pipeline
+pip install ".[cluster]"   # plus the dependencies of compare-cross-orthology's cluster mode
 ```
 
 ## Current CLI
@@ -19,8 +32,8 @@ pip install .
 Run the first workflow pass with one command:
 
 ```bash
-toga4cnee alignment.chain.gz reference_cnees.bed reference.fa/2bit query.fa/2bit \
-  --outdir results/ --query_prefix q
+toga4cnee run alignment.chain.gz reference_cnees.bed reference.fa/2bit query.fa/2bit \
+  --outdir results/ --query-prefix q
 ```
 
 The reference genome, BED and chain file must use exactly the same chromosome/contig
@@ -89,20 +102,20 @@ Projections of ref CNEEs with more than one candidate (one2many, many2one, compl
 
 ## Analysis
 ### Utility scripts
-*scripts/compare_cross_orthology.py*: collects orthology info across multiple runs of the same reference against different queries. Organized into run modes (see `--help` on each subcommand, and dev_docs/compare_cross_orthology.md):
+`toga4cnee-compare-cross-orthology` (installed with the package): collects orthology info across multiple runs of the same reference against different queries. Organized into run modes (see `--help` on each subcommand, and dev_docs/compare_cross_orthology.md):
 - `summary`: build the combined per-species orthology-category TSV
 - `sequence`: extract FASTA sequence of shared one2one orthologs
 - `cluster`: compute the D statistic of phylogenetic signal (Fritz & Purvis 2010) for CNEE loss on a tree
 
 Useage:
 ```
-python scripts/compare_cross_orthology.py summary \\
+toga4cnee-compare-cross-orthology summary \\
     --query-dirs run_dirs.txt \\
     --ref-bed reference_cnees.bed \\
     --ref-prefix dummyRef \\
     --out-dir .
 
-python scripts/compare_cross_orthology.py sequence \\
+toga4cnee-compare-cross-orthology sequence \\
     --query-dirs run_dirs.txt \\
     --orthology-table dummyRef_combined_orthology.tsv \\
     --ref-bed reference_cnees.bed \\
@@ -133,7 +146,7 @@ out/dummyRef_vs_queryC  path/to/queryC.fasta|2bit sppC
 `cluster` mode computes, per ref CNEE lost in at least `--min-lost` species (default 3; always skipped if lost in 0 or all species, since D is undefined for an invariant trait), the Fritz & Purvis D statistic of phylogenetic signal for its present/lost pattern on a given tree:
 
 ```
-python scripts/compare_cross_orthology.py cluster \\
+toga4cnee-compare-cross-orthology cluster \\
     --orthology-table dummyRef_combined_orthology.tsv \\
     --tree species.nwk \\
     --ref-prefix dummyRef \\

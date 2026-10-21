@@ -1,4 +1,4 @@
-# Utility script: compare_cross_orthology.py
+# Utility: compare_cross_orthology (`toga4cnee-compare-cross-orthology`, src/toga4cnee/cross_orthology.py)
 Goal: take output across multiple runs of pipeline using same reference vs different queries and for each reference CNEE collect orthology status in each run + summary stats, optionally extract FASTA sequence of shared one2one orthologs.
 
 MODULARIZE INTO MODES:
@@ -88,7 +88,7 @@ trait (CNEE present / CNEE lost) on a given tree, per ref CNEE.
 
 Uses `toytree` (tree traversal, `tree.pcm.simulate_continuous_bm` for the Brownian null)
 and `pandas`/`numpy`. Implementation: `run_phylo_d_analysis` / `_compute_d` /
-`_simulate_random_d_values` / `_simulate_brownian_d_values` in `compare_cross_orthology.py`.
+`_simulate_random_d_values` / `_simulate_brownian_d_values` in `cross_orthology.py`.
 
 ```
 #FXN: calculate d (sister clade distance)

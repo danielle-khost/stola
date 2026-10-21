@@ -1,0 +1,62 @@
+{% set name = "toga4cnee" %}
+{% set version = "0.3.0" %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  # Local builds use this checkout. For bioconda-recipes, replace with the
+  # tagged GitHub release (see dev_docs/conda_packaging.md):
+  #   url: https://github.com/danielle-khost/toga4cnee/archive/refs/tags/v{{ version }}.tar.gz
+  #   sha256: <sha256 of that tarball>
+  path: ..
+
+build:
+  number: 0
+  noarch: python
+  script: {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
+  entry_points:
+    - toga4cnee = toga4cnee.cli:main
+    - toga4cnee-compare-cross-orthology = toga4cnee.cross_orthology:main
+  run_exports:
+    - {{ pin_subpackage(name, max_pin="x.x") }}
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools >=77
+  run:
+    - python >=3.10
+    - biopython >=1.80
+    - networkx >=3.0
+    - numpy >=1.24
+    # compare-cross-orthology's cluster mode
+    - matplotlib-base >=3.7
+    - pandas
+    - toytree >=3.0
+
+test:
+  imports:
+    - toga4cnee
+    - toga4cnee.cross_orthology
+  commands:
+    - toga4cnee --help
+    - toga4cnee run --help
+    - toga4cnee-compare-cross-orthology --help
+    - pip check
+  requires:
+    - pip
+
+about:
+  home: https://github.com/danielle-khost/toga4cnee
+  dev_url: https://github.com/danielle-khost/toga4cnee
+  summary: TOGA-like projection and orthology classification of conserved non-exonic elements (CNEEs) via whole-genome chain alignments
+  license: MIT
+  license_family: MIT
+  license_file: LICENSE
+
+extra:
+  recipe-maintainers:
+    - danielle-khost

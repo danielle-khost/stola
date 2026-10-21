@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """Compare per-reference-CNEE orthology status across multiple pipeline runs.
 
 Takes a list of `toga4cnee run` output directories -- the same reference BED
@@ -15,9 +14,11 @@ dev_docs/compare_cross_orthology.md):
     cluster: for each ref CNEE lost in enough species (per the `summary`-mode
         orthology table), compute the D statistic of phylogenetic signal
         (Fritz & Purvis 2010) for its present/lost pattern on a given tree.
-        Needs toytree/pandas/numpy/matplotlib (all present in the `biopython`
-        conda env already used for `sequence` mode); not a hard dependency
-        of the other two modes.
+        Needs toytree/pandas/matplotlib (installed with the conda package;
+        with pip, the `cluster` extra); not a dependency of the other two
+        modes.
+
+Installed as the `toga4cnee-compare-cross-orthology` command.
 """
 
 from __future__ import annotations
@@ -29,13 +30,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-from toga4cnee.bed import parse_bed
-from toga4cnee.genome_io import open_genome_accessor
-from toga4cnee.orthology import ORTHOLOGY_COLUMNS, REF_CNEE_COLUMNS
-from toga4cnee.plots import _bar_svg
-from toga4cnee.workflow import (
+from .bed import parse_bed
+from .genome_io import open_genome_accessor
+from .orthology import ORTHOLOGY_COLUMNS, REF_CNEE_COLUMNS
+from .plots import _bar_svg
+from .workflow import (
     QUERY_BED_FILENAME,
     QUERY_ORTHOLOGY_FILENAME,
     REF_ORTHOLOGY_FILENAME,
