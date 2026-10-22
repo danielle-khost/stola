@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from toga4cnee.orthology import (
+from tunic.orthology import (
     _build_orthology_graph,
     _cluster_query_projections,
     _edge_is_solid,
@@ -149,7 +149,7 @@ def main(argv: list[str] | None = None) -> None:
     except ImportError as exc:
         raise SystemExit("networkx is required (activate the biopython conda environment).") from exc
 
-    from toga4cnee.bed import parse_bed
+    from tunic.bed import parse_bed
 
     ref_ids = [interval.cnee_uid for interval in parse_bed(args.cnee_bed)]
 

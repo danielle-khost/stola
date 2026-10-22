@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Exploratory summary of "lost" CNEEs, per tests/toga4cnee_lost_verification.png.
+"""Exploratory summary of "lost" CNEEs, per tests/tunic_lost_verification.png.
 
 For every reference CNEE with candidate chain(s) but zero aligned query bases
 (the "lost" category), looks at the chain gap it sits inside -- bounded by
@@ -47,11 +47,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from toga4cnee.chain import iter_chain_blocks
-from toga4cnee.index import load_index
-from toga4cnee.models import ChainBlock, ChainRecord
-from toga4cnee.genome_io import FastaAccessor
-from toga4cnee.synteny import BlockIndex, _flanking_blocks
+from tunic.chain import iter_chain_blocks
+from tunic.index import load_index
+from tunic.models import ChainBlock, ChainRecord
+from tunic.genome_io import FastaAccessor
+from tunic.synteny import BlockIndex, _flanking_blocks
 
 OUT_COLUMNS = [
     "ref_cnee_id",

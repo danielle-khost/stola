@@ -1,4 +1,4 @@
-"""Dependency-free SVG QC plots for TOGA4CNEE outputs."""
+"""Dependency-free SVG QC plots for TUNIC outputs."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from .spurious_filter import REJECTED_REASON_ORDER
 from .summary import stats_row_is_solid
 
 CATEGORY_ORDER = [
@@ -21,6 +22,39 @@ CATEGORY_ORDER = [
     "lost",
     "unaligned",
 ]
+
+LOG_AXIS_MIN_EXP = -0.3
+
+# Per-ref-CNEE categories (ref_ortho_status.tsv's orthology_category /
+# pre_pruning_category), in display order.
+REF_CATEGORY_ORDER = [
+    "one2one",
+    "one2many",
+    "many2one",
+    "complex/many2many",
+    "uncertain_loss",
+    "probable_loss",
+    "assembly_gap_loss",
+    "missing/loss",
+    "unaligned",
+]
+REF_CATEGORY_COLORS = {
+    "one2one": "#1f6feb",
+    "one2many": "#0f766e",
+    "many2one": "#a16207",
+    "complex/many2many": "#7c3aed",
+    "uncertain_loss": "#c2410c",
+    "probable_loss": "#64748b",
+    "assembly_gap_loss": "#94a3b8",
+    "missing/loss": "#475569",
+    "unaligned": "#111827",
+}
+MULTI_PROJECTION_CATEGORIES = ("one2many", "many2one", "complex/many2many")
+
+# Orthology summary outputs written by write_orthology_summary, each as .svg + .tsv.
+FINAL_CATEGORY_COUNTS_NAME = "final_category_counts"
+REASSIGNMENT_NAME = "initial_to_final_reassignment"
+REJECTION_REASON_COUNTS_NAME = "rejection_reason_counts"
 
 POSITIVE_CATEGORIES = {
     "one2one",
@@ -51,17 +85,19 @@ class OrthologyDiagnosticPlotResult:
 
 
 @dataclass(frozen=True)
+class OrthologySummaryResult:
+    final_category_counts: dict[str, int]
+    reassignment_counts: dict[str, dict[str, int]]  # pre_pruning_category -> final category -> n
+    rejection_reason_counts: dict[str, int]
+
+
+@dataclass(frozen=True)
 class MultiAlignmentMetricPlotResult:
     sequence_identity_density_path: Path
     gap_fraction_density_path: Path
     multi_alignment_ref_count: int
     sequence_identity_density_n: int
     gap_fraction_density_n: int
-
-
-@dataclass(frozen=True)
-class AlignedBlockDepthPlotResult:
-    path: Path
 
 
 def write_qc_plots(
@@ -163,6 +199,115 @@ def write_orthology_category_counts(
     )
     Path(out_path).write_text(svg, encoding="utf-8")
     return dict(counts)
+
+
+def write_orthology_summary(
+    ref_cnees_path: str | Path,
+    pruned_projections_path: str | Path,
+    out_dir: str | Path,
+) -> OrthologySummaryResult:
+    """Final category counts, initial -> final reassignment, and rejection
+    reason counts for a run, each written to out_dir as <name>.svg + <name>.tsv."""
+    out_dir = Path(out_dir)
+    ref_rows = _read_tsv_rows(ref_cnees_path, ("orthology_category", "pre_pruning_category"))
+    rejection_reasons = Counter(
+        row["rejection_reason"] for row in _read_tsv_rows(pruned_projections_path, ("rejection_reason",))
+    )
+
+    final_counts = Counter(row["orthology_category"] for row in ref_rows)
+    final_order = _ordered(final_counts, REF_CATEGORY_ORDER)
+    _write_count_tsv(out_dir / f"{FINAL_CATEGORY_COUNTS_NAME}.tsv", "orthology_category", final_order, final_counts)
+    (out_dir / f"{FINAL_CATEGORY_COUNTS_NAME}.svg").write_text(
+        _bar_svg(
+            title="Final orthology category counts",
+            subtitle=f"Reference CNEEs: {len(ref_rows):,} (log scale)",
+            x_label="Orthology category",
+            y_label="Reference CNEEs",
+            labels=final_order,
+            counts=[final_counts[c] for c in final_order],
+            log_scale=True,
+        ),
+        encoding="utf-8",
+    )
+
+    reassignment: dict[str, Counter[str]] = defaultdict(Counter)
+    for row in ref_rows:
+        reassignment[row["pre_pruning_category"]][row["orthology_category"]] += 1
+    initial_order = _ordered(reassignment, REF_CATEGORY_ORDER)
+    with (out_dir / f"{REASSIGNMENT_NAME}.tsv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["pre_pruning_category", *final_order, "total"])
+        for initial in initial_order:
+            row_counts = reassignment[initial]
+            writer.writerow([initial, *(row_counts[c] for c in final_order), sum(row_counts.values())])
+    # Only multi-projection initial categories go through filtering; every
+    # other initial category maps to itself, so it's left out of the plot.
+    multi_initial = [c for c in MULTI_PROJECTION_CATEGORIES if c in reassignment]
+    totals = [sum(reassignment[c].values()) for c in multi_initial]
+    (out_dir / f"{REASSIGNMENT_NAME}.svg").write_text(
+        _stacked_percent_bar_svg(
+            title="Initial -> final category reassignment",
+            subtitle="Multi-projection reference CNEEs, by initial (pre-filtering) category",
+            x_label="Initial category",
+            y_label="% of reference CNEEs in initial category",
+            groups=multi_initial,
+            group_totals=totals,
+            segments=[
+                (
+                    final,
+                    [100 * reassignment[c][final] / total for c, total in zip(multi_initial, totals)],
+                    REF_CATEGORY_COLORS.get(final, "#57606a"),
+                )
+                for final in final_order
+                if any(reassignment[c][final] for c in multi_initial)
+            ],
+        ),
+        encoding="utf-8",
+    )
+
+    reason_order = _ordered(rejection_reasons, list(REJECTED_REASON_ORDER), keep_zero=True)
+    _write_count_tsv(
+        out_dir / f"{REJECTION_REASON_COUNTS_NAME}.tsv", "rejection_reason", reason_order, rejection_reasons
+    )
+    (out_dir / f"{REJECTION_REASON_COUNTS_NAME}.svg").write_text(
+        _bar_svg(
+            title="Projection rejection reasons",
+            subtitle=f"Pruned query projections: {sum(rejection_reasons.values()):,}",
+            x_label="Rejection reason",
+            y_label="Pruned projections",
+            labels=reason_order,
+            counts=[rejection_reasons[r] for r in reason_order],
+        ),
+        encoding="utf-8",
+    )
+    return OrthologySummaryResult(
+        final_category_counts={c: final_counts[c] for c in final_order},
+        reassignment_counts={c: dict(reassignment[c]) for c in initial_order},
+        rejection_reason_counts={r: rejection_reasons[r] for r in reason_order},
+    )
+
+
+def _read_tsv_rows(path: str | Path, required: tuple[str, ...]) -> list[dict[str, str]]:
+    with Path(path).open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        missing = [column for column in required if column not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"{path} is missing columns: {', '.join(missing)}")
+        return list(reader)
+
+
+def _ordered(counts, known_order: list[str], keep_zero: bool = False) -> list[str]:
+    # Known categories first (in known_order), then anything unexpected, alphabetically.
+    head = [c for c in known_order if keep_zero or counts.get(c)]
+    return head + sorted(c for c in counts if c not in known_order)
+
+
+def _write_count_tsv(path: Path, key_column: str, order: list[str], counts: Counter[str]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow([key_column, "count"])
+        for key in order:
+            writer.writerow([key, counts[key]])
 
 
 def write_alignment_histogram(summary_path: str | Path, out_path: str | Path) -> int:
@@ -496,6 +641,15 @@ def _scale_y(value: float, max_value: float, plot_top: float, plot_height: float
     return plot_top + plot_height - (value / max_value) * plot_height
 
 
+def _log_scale_y(value: float, max_exp: int, plot_top: float, plot_height: float) -> float:
+    # log10 axis from 10^LOG_AXIS_MIN_EXP (baseline) up to 10^max_exp, so a
+    # count of 1 still gets a visible bar; non-positive values sit on the baseline.
+    if value <= 0:
+        return plot_top + plot_height
+    frac = (math.log10(value) - LOG_AXIS_MIN_EXP) / (max_exp - LOG_AXIS_MIN_EXP)
+    return plot_top + plot_height - min(1.0, max(0.0, frac)) * plot_height
+
+
 def _svg_header(width: int, height: int) -> str:
     # Create the common SVG shell and inline styles for QC plots.
     return (
@@ -522,10 +676,15 @@ def _bar_svg(
     y_label: str,
     labels: list[str],
     counts: list[int],
+    log_scale: bool = False,
 ) -> str:
     # Render a labeled bar chart and a compact count table as standalone SVG.
+    # log_scale puts counts on a log10 axis (for counts spanning orders of
+    # magnitude); long category labels are drawn rotated so they don't collide.
     width, height = 1120, 540
-    left, right, top, bottom = 80, 255, 75, 92
+    slot_guess = (width - 80 - 255) / max(1, len(labels))
+    rotate_labels = any(len(label) * 6.5 > slot_guess for label in labels)
+    left, right, top, bottom = 80, 255, 75, (140 if rotate_labels else 92)
     table_left = width - right + 32
     table_top = top + 2
     table_width = right - 55
@@ -536,21 +695,32 @@ def _bar_svg(
     slot = plot_width / len(labels)
     bar_width = slot * 0.72
 
+    if log_scale:
+        max_exp = max(1, math.ceil(math.log10(max_count))) if max_count > 0 else 1
+        tick_values = [10**exponent for exponent in range(max_exp + 1)]
+
+        def bar_top(value: float) -> float:
+            return _log_scale_y(value, max_exp, top, plot_height)
+    else:
+        tick_values = [max_count * tick / tick_count for tick in range(tick_count + 1)]
+
+        def bar_top(value: float) -> float:
+            return _scale_y(value, max_count, top, plot_height)
+
     parts = [_svg_header(width, height)]
     parts.append(f'<text class="title" x="{left}" y="34">{html.escape(title)}</text>\n')
     parts.append(
         f'<text class="subtitle" x="{left}" y="55">{html.escape(subtitle)}</text>\n'
     )
-    for tick in range(tick_count + 1):
-        value = max_count * tick / tick_count if tick_count else 0
-        y = _scale_y(value, max_count, top, plot_height)
+    for value in tick_values:
+        y = bar_top(value)
         parts.append(
             f'<line class="grid" x1="{left}" y1="{y:.2f}" '
             f'x2="{width - right}" y2="{y:.2f}"/>\n'
         )
         parts.append(
             f'<text class="tick" x="{left - 8}" y="{y + 4:.2f}" '
-            f'text-anchor="end">{int(round(value))}</text>\n'
+            f'text-anchor="end">{int(round(value)):,}</text>\n'
         )
     parts.append(
         f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}"/>\n'
@@ -561,16 +731,24 @@ def _bar_svg(
     )
     for index, (label, count) in enumerate(zip(labels, counts)):
         x = left + index * slot + (slot - bar_width) / 2
-        y = _scale_y(count, max_count, top, plot_height)
+        y = bar_top(count)
         bar_height = top + plot_height - y
         parts.append(
             f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_width:.2f}" '
             f'height="{bar_height:.2f}" fill="#2f80ed"/>\n'
         )
-        parts.append(
-            f'<text class="tick" x="{x + bar_width / 2:.2f}" y="{top + plot_height + 22}" '
-            f'text-anchor="middle">{html.escape(label)}</text>\n'
-        )
+        label_x = x + bar_width / 2
+        label_y = top + plot_height + 22
+        if rotate_labels:
+            parts.append(
+                f'<text class="tick" x="{label_x:.2f}" y="{label_y}" text-anchor="end" '
+                f'transform="rotate(-30 {label_x:.2f} {label_y})">{html.escape(label)}</text>\n'
+            )
+        else:
+            parts.append(
+                f'<text class="tick" x="{label_x:.2f}" y="{label_y}" '
+                f'text-anchor="middle">{html.escape(label)}</text>\n'
+            )
     parts.append(
         f'<text class="label" x="{left + plot_width / 2}" y="{height - 24}" '
         f'text-anchor="middle">{html.escape(x_label)}</text>\n'
@@ -613,161 +791,73 @@ def _bar_svg(
     return "".join(parts)
 
 
-def _log_scale_y(value: float, min_exp: float, max_exp: float, plot_top: float, plot_height: float) -> float:
-    # Like _scale_y but in log10 space; a non-positive value has no bar at
-    # all (same convention as a log-scale axis silently dropping it).
-    if value <= 0:
-        return plot_top + plot_height
-    exponent = min(max_exp, max(min_exp, math.log10(value)))
-    frac = (exponent - min_exp) / (max_exp - min_exp) if max_exp > min_exp else 1.0
-    return plot_top + plot_height - frac * plot_height
-
-
-def _depth_panel_svg(
-    histogram: dict[int, int],
-    stats: dict[str, float],
-    bin_max: int,
+def _stacked_percent_bar_svg(
     title: str,
-    x0: float,
-    y0: float,
-    width: float,
-    height: float,
+    subtitle: str,
+    x_label: str,
+    y_label: str,
+    groups: list[str],
+    group_totals: list[int],
+    segments: list[tuple[str, list[float], str]],
 ) -> str:
-    # One log-scale depth-density bar chart (depths 0..bin_max plus one
-    # ">bin_max" overflow bin) with a small inset mean/quartile table,
-    # translated to (x0, y0) within the caller's combined SVG canvas.
-    left, right, top, bottom = 60, 20, 36, 46
+    # One 100%-stacked bar per group; segments are (label, % per group, color),
+    # stacked bottom-up in the order given, with a legend on the right.
+    width, height = 980, 540
+    left, right, top, bottom = 80, 230, 75, 100
     plot_width = width - left - right
     plot_height = height - top - bottom
-
-    total = sum(histogram.values())
-    fractions = [histogram.get(d, 0) / total for d in range(bin_max + 1)]
-    overflow_fraction = sum(c for d, c in histogram.items() if d > bin_max) / total
-
-    positive = [f for f in fractions + [overflow_fraction] if f > 0]
-    max_exp = 0.0
-    min_exp = math.floor(math.log10(min(positive))) if positive else -1.0
-
-    slot = plot_width / (bin_max + 2)
-    bar_width = slot * 0.85
-
-    parts = [f'<g transform="translate({x0} {y0})">\n']
-    parts.append(f'<text class="label" x="{left}" y="20" font-weight="700">{html.escape(title)}</text>\n')
-
-    for exponent in range(int(min_exp), 1):
-        value = 10.0**exponent
-        y = _log_scale_y(value, min_exp, max_exp, top, plot_height)
-        parts.append(
-            f'<line class="grid" x1="{left}" y1="{y:.2f}" x2="{width - right}" y2="{y:.2f}"/>\n'
-        )
-        label = f"1e{exponent}" if exponent != 0 else "1"
-        parts.append(
-            f'<text class="tick" x="{left - 8}" y="{y + 4:.2f}" text-anchor="end">{label}</text>\n'
-        )
-
+    slot = plot_width / max(1, len(groups))
+    bar_width = slot * 0.55
     baseline = top + plot_height
+
+    parts = [_svg_header(width, height)]
+    parts.append(f'<text class="title" x="{left}" y="34">{html.escape(title)}</text>\n')
+    parts.append(f'<text class="subtitle" x="{left}" y="55">{html.escape(subtitle)}</text>\n')
+    for pct in range(0, 101, 20):
+        y = _scale_y(pct, 100, top, plot_height)
+        parts.append(f'<line class="grid" x1="{left}" y1="{y:.2f}" x2="{width - right}" y2="{y:.2f}"/>\n')
+        parts.append(f'<text class="tick" x="{left - 8}" y="{y + 4:.2f}" text-anchor="end">{pct}%</text>\n')
     parts.append(f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{baseline}"/>\n')
     parts.append(f'<line class="axis" x1="{left}" y1="{baseline}" x2="{width - right}" y2="{baseline}"/>\n')
 
-    tick_step = max(bin_max // 10, 1)
-    for depth in list(range(0, bin_max + 1)) + [bin_max + 1]:
-        value = overflow_fraction if depth == bin_max + 1 else fractions[depth]
-        x = left + depth * slot + (slot - bar_width) / 2
-        y = _log_scale_y(value, min_exp, max_exp, top, plot_height)
-        if y < baseline:
+    for index, (group, total) in enumerate(zip(groups, group_totals)):
+        x = left + index * slot + (slot - bar_width) / 2
+        stacked = 0.0
+        for label, values, color in segments:
+            value = values[index]
+            if value <= 0:
+                continue
+            y_top = _scale_y(stacked + value, 100, top, plot_height)
+            y_bottom = _scale_y(stacked, 100, top, plot_height)
             parts.append(
-                f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_width:.2f}" '
-                f'height="{baseline - y:.2f}" fill="#1f6feb"/>\n'
+                f'<rect x="{x:.2f}" y="{y_top:.2f}" width="{bar_width:.2f}" height="{y_bottom - y_top:.2f}" '
+                f'fill="{color}" stroke="#ffffff" stroke-width="1"><title>{html.escape(label)}: '
+                f'{value:.1f}%</title></rect>\n'
             )
-        # Skip bin_max itself (sits right next to the ">bin_max" overflow
-        # tick and would collide with it); every other step gets a label.
-        if depth == bin_max + 1:
-            label = f">{bin_max}"
-        elif depth % tick_step == 0 and depth != bin_max:
-            label = str(depth)
-        else:
-            continue
+            stacked += value
+        center = x + bar_width / 2
         parts.append(
-            f'<text class="tick" x="{x + bar_width / 2:.2f}" y="{baseline + 16}" '
-            f'text-anchor="middle">{label}</text>\n'
+            f'<text class="tick" x="{center:.2f}" y="{baseline + 20}" text-anchor="middle">{html.escape(group)}</text>\n'
         )
-
-    parts.append(
-        f'<text class="label" x="{left + plot_width / 2}" y="{height - 6}" '
-        'text-anchor="middle">Aligned-block depth (# overlapping aligned chain blocks)</text>\n'
-    )
-
-    table_rows = [
-        ("Mean", f"{stats['mean_depth']:.3f}"),
-        ("Q1", f"{stats['q1_depth']:.0f}"),
-        ("Median", f"{stats['median_depth']:.0f}"),
-        ("Q3", f"{stats['q3_depth']:.0f}"),
-    ]
-    table_x = width - right - 150
-    table_y = top + 6
-    parts.append(
-        f'<rect x="{table_x}" y="{table_y}" width="150" height="{18 * (len(table_rows) + 1)}" '
-        'fill="#f8fafc" stroke="#d9e2ec" stroke-width="1"/>\n'
-    )
-    parts.append(f'<text class="table-header" x="{table_x + 8}" y="{table_y + 15}">Stat</text>\n')
-    parts.append(f'<text class="table-header" x="{table_x + 142}" y="{table_y + 15}" text-anchor="end">Depth</text>\n')
-    for row_index, (label, value) in enumerate(table_rows, start=1):
-        row_y = table_y + 15 + row_index * 18
-        parts.append(f'<text class="table-text" x="{table_x + 8}" y="{row_y}">{label}</text>\n')
         parts.append(
-            f'<text class="table-text" x="{table_x + 142}" y="{row_y}" text-anchor="end">{value}</text>\n'
+            f'<text class="tick" x="{center:.2f}" y="{baseline + 36}" text-anchor="middle">n={total:,}</text>\n'
         )
-    parts.append("</g>\n")
-    return "".join(parts)
 
-
-def write_aligned_block_depth_density(
-    ref_histogram: dict[int, int],
-    ref_stats: dict[str, float],
-    query_histogram: dict[int, int],
-    query_stats: dict[str, float],
-    out_path: str | Path,
-    chain_label: str = "",
-    bin_max: int = 100,
-) -> AlignedBlockDepthPlotResult:
-    """Write a 2-panel (reference top, query bottom) per-base aligned-block
-    depth density plot, each depth above bin_max collapsed into one overflow
-    bin, with an inset mean/Q1/median/Q3 table. ref_stats/query_stats are
-    plain dicts with those four keys (see chain_depth.compute_depth_stats --
-    this module takes plain data rather than importing chain_depth itself,
-    so it stays numpy-free; the caller computes the histograms/stats)."""
-    width = 1100
-    panel_height = 420
-    title_height = 44
-    gap = 24
-    height = title_height + 2 * panel_height + gap
-
-    parts = [_svg_header(width, height)]
-    if chain_label:
-        parts.append(
-            f'<text class="title" x="30" y="30" font-size="18">'
-            f'Per-base aligned-block depth -- {html.escape(chain_label)}</text>\n'
-        )
-    ref_total = ref_stats.get("n_total_bases", sum(ref_histogram.values()))
-    query_total = query_stats.get("n_total_bases", sum(query_histogram.values()))
+    legend_x = width - right + 28
+    for index, (label, _, color) in enumerate(reversed(segments)):
+        y = top + 6 + index * 22
+        parts.append(f'<rect x="{legend_x}" y="{y - 9}" width="14" height="14" fill="{color}"/>\n')
+        parts.append(f'<text class="tick" x="{legend_x + 22}" y="{y + 2}">{html.escape(label)}</text>\n')
     parts.append(
-        _depth_panel_svg(
-            ref_histogram, ref_stats, bin_max, f"Reference genome (n={ref_total:,} bp)",
-            0, title_height, width, panel_height,
-        )
+        f'<text class="label" x="{left + plot_width / 2}" y="{height - 24}" '
+        f'text-anchor="middle">{html.escape(x_label)}</text>\n'
     )
     parts.append(
-        _depth_panel_svg(
-            query_histogram, query_stats, bin_max, f"Query genome (n={query_total:,} bp)",
-            0, title_height + panel_height + gap, width, panel_height,
-        )
+        f'<text class="label" transform="translate(22 {top + plot_height / 2}) rotate(-90)" '
+        f'text-anchor="middle">{html.escape(y_label)}</text>\n'
     )
     parts.append("</svg>\n")
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("".join(parts), encoding="utf-8")
-    return AlignedBlockDepthPlotResult(path=out_path)
+    return "".join(parts)
 
 
 def _grouped_density_svg(

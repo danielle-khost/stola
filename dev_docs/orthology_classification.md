@@ -11,21 +11,21 @@ filtering can happen post-hoc if desired.
 Anything with more than one candidate projection -- one2many, many2one, or
 complex/many2many by initial graph shape -- goes through relative-score
 filtering ("Modified relative scoring algo" in `spurious_hit_filtering.md`;
-`toga4cnee.spurious_filter`, wired into
-`toga4cnee.orthology.classify_orthology` as `filter_multi_projections`).
+`tunic.spurious_filter`, wired into
+`tunic.orthology.classify_orthology` as `filter_multi_projections`).
 It works per query locus (the merged query span of the eligible
 projections landing there), scoring every chain aligned at that locus once:
 - Soft depth filter: of the chains overlapping the locus, only the top 20
   (`--soft-depth-limit`) by chain score that actually have aligned bases
   there are scored; a projection on any other chain is pruned as
-  repeat-driven (`high_depth_low_chain_rank`).
+  repeat-driven (`depth`).
 - If only one chain aligns there, its projection is kept only if its
   surrounding flanks have real aligned-block coverage from ANY chain
   (`no_flank_support` otherwise).
 - Otherwise, each chain's local score = sequence identity over the locus x
   aligned fraction over the locus plus 10kb flanks each side; a projection
   is kept if its chain's score is > 0.5 (`--relative-score-threshold`) of
-  the best chain's at that locus (`low_relative_score` otherwise). Several
+  the best chain's at that locus (`low_score` otherwise). Several
   chains can pass at one locus, so many2one calls can survive filtering.
 
 # Orthology categories:

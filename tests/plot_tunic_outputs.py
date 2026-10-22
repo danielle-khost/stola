@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate TOGA4CNEE diagnostic figures from completed test outputs."""
+"""Generate TUNIC diagnostic figures from completed test outputs."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from toga4cnee.plots import (
+from tunic.plots import (
     write_gap_fraction_density,
     write_multi_alignment_metric_densities,
     write_orthology_diagnostic_plots,
@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Define a test-oriented plotting interface separate from the main workflow.
     parser = argparse.ArgumentParser(
         description=(
-            "Generate SVG diagnostic plots from completed TOGA4CNEE output files."
+            "Generate SVG diagnostic plots from completed TUNIC output files."
         )
     )
     parser.add_argument("--summary", required=True, type=Path, help="Summary TSV")

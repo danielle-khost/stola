@@ -1,13 +1,13 @@
 #!/usr/bin/env python
-"""Compare reference CNEE recovery between TOGA4CNEE and UCSC liftOver.
+"""Compare reference CNEE recovery between TUNIC and UCSC liftOver.
 
 This is a standalone test/diagnostic script, not part of the main package CLI.
 
 Example:
     conda activate biopython
     python tests/compare_liftover_results.py \
-        --toga-bed /private/tmp/toga4cnee_pigeon_chicken_orthology/query_cnees.bed \
-        --toga-orthology /private/tmp/toga4cnee_pigeon_chicken_orthology/overlap_stats.orthology.tsv \
+        --toga-bed /private/tmp/tunic_pigeon_chicken_orthology/query_cnees.bed \
+        --toga-orthology /private/tmp/tunic_pigeon_chicken_orthology/overlap_stats.orthology.tsv \
         --out /private/tmp/pigeon_liftover_ref_comparison.tsv
 """
 
@@ -145,7 +145,7 @@ text{{font-family:Arial,Helvetica,sans-serif;fill:#1f2933}}
 <text class="title" x="40" y="44">{title}</text>
 <circle cx="{left_cx}" cy="{cy}" r="{radius}" fill="#3b82f6" fill-opacity="0.32" stroke="#2563eb" stroke-width="2"/>
 <circle cx="{right_cx}" cy="{cy}" r="{radius}" fill="#f59e0b" fill-opacity="0.34" stroke="#d97706" stroke-width="2"/>
-<text class="label" x="{left_cx - 75}" y="{cy - radius - 22}">TOGA4CNEE</text>
+<text class="label" x="{left_cx - 75}" y="{cy - radius - 22}">TUNIC</text>
 <text class="label" x="{right_cx - 52}" y="{cy - radius - 22}">UCSC liftOver</text>
 <text class="count" x="{left_cx - 82}" y="{cy + 8}" text-anchor="middle">{left_only}</text>
 <text class="count" x="{(left_cx + right_cx) / 2:.0f}" y="{cy + 8}" text-anchor="middle">{shared}</text>
@@ -167,7 +167,7 @@ def compare_outputs(
     # Build a reference-ID recovery summary for both methods.
     ref_ids = read_ref_ids(ref_bed)
     orthology_map = read_orthology_map(toga_orthology)
-    toga = add_comparison_keys(read_bed(toga_bed, "toga4cnee"), orthology_map)
+    toga = add_comparison_keys(read_bed(toga_bed, "tunic"), orthology_map)
     ucsc = add_comparison_keys(read_bed(ucsc_bed, "ucsc_liftover"))
 
     toga_ref_ids = collect_ref_ids(toga).intersection(ref_ids)
@@ -179,37 +179,37 @@ def compare_outputs(
     rows = [
         {
             "category": "total ref annotations",
-            "toga4cnee": len(ref_ids),
+            "tunic": len(ref_ids),
             "ucsc_liftover": len(ref_ids),
         },
         {
             "category": "total query annotations",
-            "toga4cnee": len(toga),
+            "tunic": len(toga),
             "ucsc_liftover": len(ucsc),
         },
         {
             "category": "total shared annotations",
-            "toga4cnee": len(shared),
+            "tunic": len(shared),
             "ucsc_liftover": len(shared),
         },
         {
             "category": "total unique annotations",
-            "toga4cnee": len(toga_unique),
+            "tunic": len(toga_unique),
             "ucsc_liftover": len(ucsc_unique),
         },
     ]
     venn_counts = {
-        "toga4cnee_unique": len(toga_unique),
+        "tunic_unique": len(toga_unique),
         "shared": len(shared),
         "ucsc_liftover_unique": len(ucsc_unique),
     }
-    return pd.DataFrame(rows, columns=["category", "toga4cnee", "ucsc_liftover"]), venn_counts
+    return pd.DataFrame(rows, columns=["category", "tunic", "ucsc_liftover"]), venn_counts
 
 
 def build_parser() -> argparse.ArgumentParser:
     # Define file paths for standalone comparison runs.
     parser = argparse.ArgumentParser(
-        description="Compare TOGA4CNEE query BED output to UCSC liftOver results."
+        description="Compare TUNIC query BED output to UCSC liftOver results."
     )
     parser.add_argument("--toga-bed", required=True, type=Path)
     parser.add_argument("--ref-bed", default=DEFAULT_REF_BED, type=Path)
@@ -255,7 +255,7 @@ def main() -> None:
         write_venn_svg(
             out_venn,
             species=species,
-            left_only=venn_counts["toga4cnee_unique"],
+            left_only=venn_counts["tunic_unique"],
             shared=venn_counts["shared"],
             right_only=venn_counts["ucsc_liftover_unique"],
         )

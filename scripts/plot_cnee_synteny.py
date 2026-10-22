@@ -10,7 +10,7 @@ and lost CNEEs fan out over every candidate alignment (or, for lost, every
 candidate chain's interpolated query anchor).
 
 Requires matplotlib (`pip install matplotlib`, or `pip install .[viz]` from
-the repo root) in addition to the toga4cnee package itself.
+the repo root) in addition to the tunic package itself.
 
 Example:
     PYTHONPATH=src python scripts/plot_cnee_synteny.py \\
@@ -36,11 +36,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from toga4cnee.bed import parse_bed
-from toga4cnee.chain import iter_chain_blocks
-from toga4cnee.index import load_index
-from toga4cnee.summary import stats_row_is_solid
-from toga4cnee.synteny import (
+from tunic.bed import parse_bed
+from tunic.chain import iter_chain_blocks
+from tunic.index import load_index
+from tunic.summary import stats_row_is_solid
+from tunic.synteny import (
     BlockIndex,
     OrthologyIndex,
     QueryBedRecord,

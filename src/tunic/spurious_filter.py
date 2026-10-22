@@ -52,12 +52,12 @@ DEFAULT_RELATIVE_SCORE_THRESHOLD = 0.5
 SCAN_CAP_MULTIPLIER = 10
 
 # Outcome labels (pruned_query_projections.tsv's rejection_reason column).
-REJECTED_HIGH_DEPTH_LOW_CHAIN_RANK = "high_depth_low_chain_rank"
+REJECTED_DEPTH = "depth"  # chain outside the soft depth filter's top chains
 ACCEPTED_ISOLATED_WITH_FLANK_SUPPORT = "accepted_isolated_with_flank_support"
 REJECTED_ISOLATED_NO_FLANK_SUPPORT = "no_flank_support"
 ACCEPTED_RELATIVE_SCORE = "accepted_relative_score"
-REJECTED_LOW_RELATIVE_SCORE = "low_relative_score"
-REJECTED_ZERO_LOCUS_SCORE = "zero_locus_score"
+REJECTED_LOW_SCORE = "low_score"  # relative score at or below threshold (or no chain scores > 0)
+REJECTED_REASON_ORDER = (REJECTED_DEPTH, REJECTED_ISOLATED_NO_FLANK_SUPPORT, REJECTED_LOW_SCORE)
 
 
 @dataclass(frozen=True)
@@ -453,7 +453,7 @@ def decide_locus(
     for i, p in enumerate(locus_projections):
         if p.chain_id not in local_by_chain:
             verdicts.append(ProjectionVerdict(
-                accepted=False, branch="soft_depth_filtered", outcome=REJECTED_HIGH_DEPTH_LOW_CHAIN_RANK,
+                accepted=False, branch="soft_depth_filtered", outcome=REJECTED_DEPTH,
                 locus_depth=scores.envelope_depth, n_competing_chains=n_kept,
             ))
             continue
@@ -472,7 +472,7 @@ def decide_locus(
         best_other = max(v for cid, v in local_by_chain.items() if cid != p.chain_id)
         if s_max <= 0:
             verdicts.append(ProjectionVerdict(
-                accepted=False, branch="competing", outcome=REJECTED_ZERO_LOCUS_SCORE,
+                accepted=False, branch="competing", outcome=REJECTED_LOW_SCORE,
                 locus_depth=scores.envelope_depth, n_competing_chains=n_kept - 1,
                 local_score=own, best_competitor_local_score=best_other,
             ))
@@ -481,7 +481,7 @@ def decide_locus(
         accepted = relative > relative_score_threshold
         verdicts.append(ProjectionVerdict(
             accepted=accepted, branch="competing",
-            outcome=ACCEPTED_RELATIVE_SCORE if accepted else REJECTED_LOW_RELATIVE_SCORE,
+            outcome=ACCEPTED_RELATIVE_SCORE if accepted else REJECTED_LOW_SCORE,
             locus_depth=scores.envelope_depth, n_competing_chains=n_kept - 1,
             local_score=own, best_competitor_local_score=best_other, relative_score=relative,
         ))

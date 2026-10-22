@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""CLI wrapper for toga4cnee.assembly_gaps -- report a genome's inferred gap convention.
+"""CLI wrapper for tunic.assembly_gaps -- report a genome's inferred gap convention.
 
-See toga4cnee/assembly_gaps.py for the algorithm. This script scans a genome
+See tunic/assembly_gaps.py for the algorithm. This script scans a genome
 file (FASTA or .2bit) and prints the N-run length distribution plus the
 confidence verdict -- useful for sanity-checking --min-gap-length against a
-specific genome before a real `toga4cnee run`, which does this same
+specific genome before a real `tunic` run, which does this same
 inference internally.
 
 Example:
@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from toga4cnee.assembly_gaps import (
+from tunic.assembly_gaps import (
     DEFAULT_MIN_GAP_LENGTH,
     MIN_RUNS_FOR_INFERENCE,
     infer_gap_convention,

@@ -9,7 +9,7 @@ REFFASTA="tests/GCF_016699485.2_bGalGal1.mat.broiler.GRCg7b_genomic.fna"
 QUERYFASTA="tests/GCA_031468815.1_bMorBas2.hap2_genomic.fna"
 PREFIX="morBass"
 
-PYTHONPATH=src python -m toga4cnee.cli run \
+PYTHONPATH=src python -m tunic.cli \
   $CHAIN \
   $REFBED \
   $REFFASTA \
@@ -19,8 +19,8 @@ PYTHONPATH=src python -m toga4cnee.cli run \
   --min-sequence-identity 0.7
 
 
-python tests/plot_toga4cnee_outputs.py \
-  --summary ${OUTPATH}/overlap_stats.summary.tsv \
+python tests/plot_tunic_outputs.py \
+  --summary ${OUTPATH}/summary_figures/overlap_stats.summary.tsv \
   --stats ${OUTPATH}/overlap_stats.tsv \
   --orthology ${OUTPATH}/query_ortho_status.tsv \
   --out-dir ${OUTPATH}/figures \

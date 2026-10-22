@@ -1,4 +1,4 @@
-{% set name = "toga4cnee" %}
+{% set name = "tunic" %}
 {% set version = "0.3.0" %}
 
 package:
@@ -17,8 +17,8 @@ build:
   noarch: python
   script: {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
   entry_points:
-    - toga4cnee = toga4cnee.cli:main
-    - toga4cnee-compare-cross-orthology = toga4cnee.cross_orthology:main
+    - tunic = tunic.cli:main
+    - tunic-compare-cross-orthology = tunic.cross_orthology:main
   run_exports:
     - {{ pin_subpackage(name, max_pin="x.x") }}
 
@@ -39,12 +39,11 @@ requirements:
 
 test:
   imports:
-    - toga4cnee
-    - toga4cnee.cross_orthology
+    - tunic
+    - tunic.cross_orthology
   commands:
-    - toga4cnee --help
-    - toga4cnee run --help
-    - toga4cnee-compare-cross-orthology --help
+    - tunic --help
+    - tunic-compare-cross-orthology --help
     - pip check
   requires:
     - pip

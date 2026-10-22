@@ -76,7 +76,7 @@ def _check_chromosome_names_match(
     more = f", plus {len(mismatches) - 5} more" if len(mismatches) > 5 else ""
     raise ValueError(
         "Reference BED and chain file use different chromosome naming "
-        f"conventions -- e.g. {examples}{more}. toga4cnee requires exact "
+        f"conventions -- e.g. {examples}{more}. tunic requires exact "
         "chromosome ID matches between the BED and chain files; rename one "
         "side to match the other (e.g. add or strip the accession version) "
         "and rerun."

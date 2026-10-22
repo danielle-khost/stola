@@ -1,4 +1,4 @@
-"""Single-command TOGA4CNEE workflow runner."""
+"""Single-command TUNIC workflow runner."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from .orthology import (
     classify_orthology,
 )
 from .overlap import write_overlap_stats
+from .plots import OrthologySummaryResult, PlotResult, write_orthology_summary, write_qc_plots
 from .sequence_compare import SequenceComparator
 from .synteny import (
     DEFAULT_FLANK_SIZES,
@@ -30,13 +31,19 @@ from .synteny import (
 )
 from .summary import summarize_overlap_stats
 
-# Fixed output layout under --outdir -- see output_files.md. Not individually
+# Fixed output layout under --outdir -- see the README's Output section. Not individually
 # overridable; --outdir is the only output-location knob the CLI exposes. The
 # synteny reports are exploratory/diagnostic, not main output, so they live
 # under work/ alongside the other intermediates rather than in outdir itself.
 QUERY_BED_FILENAME = "query_cnees.bed"
 STATS_FILENAME = "overlap_stats.tsv"
+# Summary tables and QC plots, under SUMMARY_DIRNAME (plus the orthology
+# summary .svg/.tsv pairs named in plots.py's *_NAME constants).
+SUMMARY_DIRNAME = "summary_figures"
 SUMMARY_FILENAME = "overlap_stats.summary.tsv"
+ALIGNMENT_HISTOGRAM_FILENAME = "num_query_alignments.svg"
+OVERLAP_DENSITY_FILENAME = "overlap_fraction_density.svg"
+SEQUENCE_IDENTITY_DENSITY_FILENAME = "sequence_identity_density.svg"
 SYNTENY_FILENAME = "overlap_stats.synteny.tsv"
 SYNTENY_NEIGHBORS_FILENAME = "overlap_stats.synteny_neighbors.tsv"
 QUERY_ORTHOLOGY_FILENAME = "query_ortho_status.tsv"
@@ -53,6 +60,8 @@ class WorkflowResult:
     stats_count: int
     query_bed_count: int
     summary_count: int
+    summary_plots: PlotResult
+    orthology_summary: OrthologySummaryResult
     orthology_result: OrthologyResult
     synteny_result: SyntenyResult
     synteny_neighbor_result: SyntenyResult
@@ -61,6 +70,7 @@ class WorkflowResult:
     candidates_path: Path
     query_bed_path: Path
     stats_path: Path
+    summary_dir: Path
     summary_path: Path
     synteny_path: Path
     synteny_neighbors_path: Path
@@ -101,7 +111,9 @@ def run_workflow(
 
     out_bed = outdir_path / QUERY_BED_FILENAME
     out_stats = outdir_path / STATS_FILENAME
-    out_summary = outdir_path / SUMMARY_FILENAME
+    summary_dir = outdir_path / SUMMARY_DIRNAME
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    out_summary = summary_dir / SUMMARY_FILENAME
     out_synteny = work_dir / SYNTENY_FILENAME
     out_synteny_neighbors = work_dir / SYNTENY_NEIGHBORS_FILENAME
     out_orthology = outdir_path / QUERY_ORTHOLOGY_FILENAME
@@ -187,6 +199,14 @@ def run_workflow(
         )
     finally:
         sequence_comparator.close()
+    summary_plots = write_qc_plots(
+        out_summary,
+        out_stats,
+        summary_dir / ALIGNMENT_HISTOGRAM_FILENAME,
+        summary_dir / OVERLAP_DENSITY_FILENAME,
+        summary_dir / SEQUENCE_IDENTITY_DENSITY_FILENAME,
+    )
+    orthology_summary = write_orthology_summary(out_ref_cnees, out_culled_projections, summary_dir)
 
     return WorkflowResult(
         chain_count=int(index_payload["chain_count"]),
@@ -194,6 +214,8 @@ def run_workflow(
         stats_count=stats_count,
         query_bed_count=orthology_result.query_bed_rows,
         summary_count=summary_count,
+        summary_plots=summary_plots,
+        orthology_summary=orthology_summary,
         orthology_result=orthology_result,
         synteny_result=synteny_result,
         synteny_neighbor_result=synteny_neighbor_result,
@@ -202,6 +224,7 @@ def run_workflow(
         candidates_path=candidates_path,
         query_bed_path=out_bed,
         stats_path=out_stats,
+        summary_dir=summary_dir,
         summary_path=out_summary,
         synteny_path=out_synteny,
         synteny_neighbors_path=out_synteny_neighbors,

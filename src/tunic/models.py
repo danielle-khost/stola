@@ -1,4 +1,4 @@
-"""Small shared data models for TOGA4CNEE."""
+"""Small shared data models for TUNIC."""
 
 from __future__ import annotations
 

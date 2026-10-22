@@ -9,12 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from toga4cnee.candidates import write_candidates
-from toga4cnee.index import build_index, load_index
-from toga4cnee.overlap import calculate_overlap_rows, write_overlap_stats
-from toga4cnee.sequence_compare import SequenceComparator
-from toga4cnee.summary import summarize_overlap_stats
-from toga4cnee.workflow import run_workflow
+from tunic.candidates import write_candidates
+from tunic.index import build_index, load_index
+from tunic.overlap import calculate_overlap_rows, write_overlap_stats
+from tunic.sequence_compare import SequenceComparator
+from tunic.summary import summarize_overlap_stats
+from tunic.workflow import run_workflow
 
 
 def _has_networkx() -> bool:
@@ -161,7 +161,7 @@ def _classify_with_filtering(
     # Real index -> candidates -> overlap stats -> classify_orthology chain,
     # with multi-projection filtering on. Returns (result, query orthology
     # rows, pruned-projection rows).
-    from toga4cnee.orthology import classify_orthology
+    from tunic.orthology import classify_orthology
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     bed = tmp_path / "cnees.bed"
@@ -427,6 +427,36 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(rows["CNEE_WEAK_ONLY"]["overlap_fractions"], "0.5")
         self.assertEqual(rows["CNEE_WEAK_ONLY"]["gap_bases"], "25")
 
+    def test_cli_runs_workflow_from_bare_arguments(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from tunic.cli import main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
+            outdir = tmp_path / "out"
+
+            main([str(chain), str(bed), str(ref_fasta), str(query_fasta), "--outdir", str(outdir)])
+
+            ref_rows = _read_tsv(outdir / "ref_ortho_status.tsv")
+            plots = {
+                name: (outdir / "summary_figures" / name).read_text(encoding="utf-8")
+                for name in (
+                    "num_query_alignments.svg",
+                    "overlap_fraction_density.svg",
+                    "sequence_identity_density.svg",
+                )
+            }
+
+        self.assertEqual(len(ref_rows), 3)
+        for name, svg in plots.items():
+            self.assertTrue(svg.startswith("<svg"), name)
+            self.assertIn("</svg>", svg, name)
+        # The fixture's aligned candidate rows give the density plots a curve.
+        self.assertIn("<polyline", plots["overlap_fraction_density.svg"])
+
     def test_single_workflow_writes_stats_and_query_bed(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
@@ -441,7 +471,38 @@ class WorkflowTests(unittest.TestCase):
             summary_rows = _read_tsv(result.summary_path)
             orthology_rows = _read_tsv(result.orthology_path)
             synteny_rows = _read_tsv(result.synteny_path)
+            summary_figures = sorted(path.name for path in (tmp_path / "summary_figures").iterdir())
 
+        self.assertEqual(result.summary_path, tmp_path / "summary_figures" / "overlap_stats.summary.tsv")
+        self.assertEqual(
+            summary_figures,
+            [
+                "final_category_counts.svg",
+                "final_category_counts.tsv",
+                "initial_to_final_reassignment.svg",
+                "initial_to_final_reassignment.tsv",
+                "num_query_alignments.svg",
+                "overlap_fraction_density.svg",
+                "overlap_stats.summary.tsv",
+                "rejection_reason_counts.svg",
+                "rejection_reason_counts.tsv",
+                "sequence_identity_density.svg",
+            ],
+        )
+        self.assertEqual(result.summary_plots.histogram_n, 3)
+        summary = result.orthology_summary
+        # No query FASTA gap convention can be inferred from this tiny fixture,
+        # so the lost ref collapses to missing/loss.
+        self.assertEqual(
+            summary.final_category_counts,
+            {"uncertain_loss": 1, "missing/loss": 1, "unaligned": 1},
+        )
+        self.assertEqual(summary.reassignment_counts["one2many"], {"uncertain_loss": 1})
+        # Both CNEE_PARTIAL projections fail the single-chain flank check;
+        # every reason is listed even at zero.
+        self.assertEqual(
+            summary.rejection_reason_counts, {"depth": 0, "no_flank_support": 2, "low_score": 0}
+        )
         self.assertEqual(result.chain_count, 3)
         self.assertEqual(result.candidate_count, 3)
         self.assertEqual(result.stats_count, 3)
@@ -553,7 +614,7 @@ class WorkflowTests(unittest.TestCase):
             self.skipTest("networkx is not installed")
         import networkx as nx
 
-        from toga4cnee.orthology import (
+        from tunic.orthology import (
             _build_orthology_graph,
             _cluster_query_projections,
             _read_projection_evidence,
@@ -606,7 +667,7 @@ class WorkflowTests(unittest.TestCase):
     def test_orthology_classification_uses_solid_edges_only(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
+        from tunic.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -703,7 +764,7 @@ class WorkflowTests(unittest.TestCase):
     ) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
+        from tunic.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -768,7 +829,7 @@ class WorkflowTests(unittest.TestCase):
     def test_classify_orthology_uses_custom_query_id_prefix(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
+        from tunic.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -821,7 +882,7 @@ class WorkflowTests(unittest.TestCase):
     def test_classify_orthology_appends_missing_underscore_to_query_id_prefix(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
+        from tunic.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -922,7 +983,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(culled_row["ref_cnee_id"], "MULTI")
         self.assertEqual(culled_row["query_chrom"], "chrQ2")
         self.assertEqual(culled_row["initial_orthology_category"], "one2many")
-        self.assertEqual(culled_row["rejection_reason"], "low_relative_score")
+        self.assertEqual(culled_row["rejection_reason"], "low_score")
         self.assertEqual(culled_row["locus_depth"], "2")
         self.assertEqual(float(culled_row["local_score"]), 0.0)
         self.assertAlmostEqual(float(culled_row["best_competitor_local_score"]), 100 / 150)
@@ -1007,14 +1068,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(limited_culled), 1)
         culled_row = limited_culled[0]
         self.assertEqual(culled_row["query_chrom"], "chrQ2")
-        self.assertEqual(culled_row["rejection_reason"], "high_depth_low_chain_rank")
+        self.assertEqual(culled_row["rejection_reason"], "depth")
         self.assertEqual(culled_row["locus_depth"], "2")
         self.assertEqual(culled_row["local_score"], ".")
 
     def test_ref_cnee_tsv_splits_lost_by_query_assembly_gap_overlap(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
+        from tunic.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1059,7 +1120,7 @@ class WorkflowTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            from toga4cnee.index import build_index
+            from tunic.index import build_index
 
             build_index(chain, index)
 
@@ -1154,7 +1215,7 @@ class WorkflowTests(unittest.TestCase):
     def test_ref_cnee_tsv_collapses_lost_categories_without_query_fasta(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
+        from tunic.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1179,7 +1240,7 @@ class WorkflowTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            from toga4cnee.index import build_index
+            from tunic.index import build_index
 
             build_index(chain, index)
 
@@ -1224,7 +1285,7 @@ class WorkflowTests(unittest.TestCase):
     def test_orthology_clustering_keeps_opposite_strand_overlaps_separate(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
+        from tunic.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1284,7 +1345,7 @@ class WorkflowTests(unittest.TestCase):
     def test_duplicate_cnee_ids_are_kept_distinct_via_cnee_uid(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
+        from tunic.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1358,7 +1419,7 @@ class WorkflowTests(unittest.TestCase):
     ) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.synteny import write_synteny_verification
+        from tunic.synteny import write_synteny_verification
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1373,7 +1434,7 @@ class WorkflowTests(unittest.TestCase):
             build_index(chain, index)
             write_candidates(index, bed, candidates)
             write_overlap_stats(index, candidates, stats)
-            from toga4cnee.orthology import classify_orthology
+            from tunic.orthology import classify_orthology
 
             # This test is about write_synteny_verification's own flank-size
             # behavior, not multi-projection filtering -- CNEE_PARTIAL's one2many
@@ -1415,8 +1476,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(sizes_for_uid, {500, 50})
 
     def test_distance_to_nearest_block_handles_overlap_and_gaps(self) -> None:
-        from toga4cnee.models import ChainBlock
-        from toga4cnee.synteny import BlockIndex, _distance_to_nearest_block
+        from tunic.models import ChainBlock
+        from tunic.synteny import BlockIndex, _distance_to_nearest_block
 
         blocks = BlockIndex.from_blocks(
             [
@@ -1434,7 +1495,7 @@ class WorkflowTests(unittest.TestCase):
     def test_nearest_cnee_neighbor_distances_computes_gaps_on_same_chromosome(
         self,
     ) -> None:
-        from toga4cnee.synteny import _nearest_cnee_neighbor_distances
+        from tunic.synteny import _nearest_cnee_neighbor_distances
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bed = Path(tmpdir) / "cnees.bed"
@@ -1454,7 +1515,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(distances["D"])
 
     def test_synteny_selection_caps_one2one_controls(self) -> None:
-        from toga4cnee.synteny import _select_synteny_targets
+        from tunic.synteny import _select_synteny_targets
 
         rows = [
             {
@@ -1508,7 +1569,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(targets[0].output_id, "q_CNEE_A")
 
     def test_ref_neighbor_index_directional_lookup_and_chromosome_edges(self) -> None:
-        from toga4cnee.synteny import RefNeighborIndex
+        from tunic.synteny import RefNeighborIndex
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bed = Path(tmpdir) / "cnees.bed"
@@ -1529,7 +1590,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(index.neighbor("D", "right"), (None, None))
 
     def test_query_neighbor_index_directional_lookup(self) -> None:
-        from toga4cnee.synteny import QueryBedRecord, QueryNeighborIndex
+        from tunic.synteny import QueryBedRecord, QueryNeighborIndex
 
         by_chrom = {
             "chrQ": [
@@ -1545,7 +1606,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(index.neighbor("chrQ2", 10, "before"), (None, None))
 
     def test_orthology_index_assigns_category_to_every_partner_ref(self) -> None:
-        from toga4cnee.synteny import OrthologyIndex
+        from tunic.synteny import OrthologyIndex
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orthology = Path(tmpdir) / "orthology.tsv"
@@ -1567,8 +1628,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("NA", index.category_by_query_id)
 
     def test_query_flank_anchors_own_interval_forward_and_reverse_strand(self) -> None:
-        from toga4cnee.models import ChainRecord
-        from toga4cnee.synteny import BlockIndex, _query_flank_anchors
+        from tunic.models import ChainRecord
+        from tunic.synteny import BlockIndex, _query_flank_anchors
 
         blocks = BlockIndex.from_blocks([])
         row = {
@@ -1607,8 +1668,8 @@ class WorkflowTests(unittest.TestCase):
     def test_query_flank_anchors_interpolates_from_flanking_blocks_for_lost_candidates(
         self,
     ) -> None:
-        from toga4cnee.models import ChainBlock, ChainRecord
-        from toga4cnee.synteny import BlockIndex, _query_flank_anchors
+        from tunic.models import ChainBlock, ChainRecord
+        from tunic.synteny import BlockIndex, _query_flank_anchors
 
         blocks = BlockIndex.from_blocks(
             [
@@ -1696,8 +1757,8 @@ class WorkflowTests(unittest.TestCase):
     ) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from toga4cnee.orthology import classify_orthology
-        from toga4cnee.synteny import write_synteny_neighbor_verification
+        from tunic.orthology import classify_orthology
+        from tunic.synteny import write_synteny_neighbor_verification
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1761,7 +1822,7 @@ class WorkflowTests(unittest.TestCase):
         )
 
     def test_candidate_query_projection_by_status(self) -> None:
-        from toga4cnee.synteny import SyntenyTarget, _candidate_query_projection
+        from tunic.synteny import SyntenyTarget, _candidate_query_projection
 
         lost_target = SyntenyTarget(
             row={
@@ -1823,7 +1884,7 @@ class WorkflowTests(unittest.TestCase):
     def test_synteny_neighbor_verification_flags_mismatch_for_rearranged_query_neighbor(
         self,
     ) -> None:
-        from toga4cnee.synteny import write_synteny_neighbor_verification
+        from tunic.synteny import write_synteny_neighbor_verification
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1879,7 +1940,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(right["synteny_matches"], "TRUE")
 
     def test_synteny_neighbor_verification_reports_dot_when_undeterminable(self) -> None:
-        from toga4cnee.synteny import write_synteny_neighbor_verification
+        from tunic.synteny import write_synteny_neighbor_verification
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1919,7 +1980,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(row["nearest_ref_cnee_id"], {"CNEE_A", "CNEE_C"})
 
     def test_orthology_diagnostic_plots_use_category_groups(self) -> None:
-        from toga4cnee.plots import write_orthology_diagnostic_plots
+        from tunic.plots import write_orthology_diagnostic_plots
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1982,7 +2043,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Gap fraction by orthology category", gap_text)
 
     def test_multi_alignment_metric_plots_filter_by_summary_counts(self) -> None:
-        from toga4cnee.plots import write_multi_alignment_metric_densities
+        from tunic.plots import write_multi_alignment_metric_densities
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2022,7 +2083,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Gap fraction density for multi-query CNEEs", gap_text)
 
     def test_fasta_accessor_fetches_correctly_across_wrapped_lines(self) -> None:
-        from toga4cnee.genome_io import FastaAccessor
+        from tunic.genome_io import FastaAccessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2042,7 +2103,7 @@ class WorkflowTests(unittest.TestCase):
                 accessor.close()
 
     def test_fasta_accessor_rejects_ragged_line_wrapping(self) -> None:
-        from toga4cnee.genome_io import FastaAccessor
+        from tunic.genome_io import FastaAccessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2060,7 +2121,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("chr1", str(ctx.exception))
 
     def test_sniff_genome_format_detects_twobit_vs_fasta(self) -> None:
-        from toga4cnee.genome_io import sniff_genome_format
+        from tunic.genome_io import sniff_genome_format
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2073,7 +2134,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(sniff_genome_format(fasta), "fasta")
 
     def test_twobit_accessor_fetches_bases_n_blocks_and_version_alias(self) -> None:
-        from toga4cnee.genome_io import TwoBitAccessor
+        from tunic.genome_io import TwoBitAccessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2096,7 +2157,7 @@ class WorkflowTests(unittest.TestCase):
                 accessor.close()
 
     def test_open_genome_accessor_dispatches_on_sniffed_format(self) -> None:
-        from toga4cnee.genome_io import FastaAccessor, TwoBitAccessor, open_genome_accessor
+        from tunic.genome_io import FastaAccessor, TwoBitAccessor, open_genome_accessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2117,7 +2178,7 @@ class WorkflowTests(unittest.TestCase):
                 fasta_accessor.close()
 
     def test_iter_n_runs_matches_between_fasta_and_twobit_for_same_content(self) -> None:
-        from toga4cnee.assembly_gaps import iter_n_runs
+        from tunic.assembly_gaps import iter_n_runs
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2143,8 +2204,8 @@ class WorkflowTests(unittest.TestCase):
             import Bio  # noqa: F401
         except ImportError:
             self.skipTest("Biopython is not installed")
-        from toga4cnee.chain import iter_chain_blocks
-        from toga4cnee.sequence_compare import aligned_segments_for_interval
+        from tunic.chain import iter_chain_blocks
+        from tunic.sequence_compare import aligned_segments_for_interval
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2209,7 +2270,7 @@ class WorkflowTests(unittest.TestCase):
             write_candidates(index, bed, candidates)
             comparator = SequenceComparator(ref_fasta, query_fasta, tmp_path)
             try:
-                from toga4cnee.overlap import iter_overlap_rows
+                from tunic.overlap import iter_overlap_rows
 
                 seq_rows = list(
                     iter_overlap_rows(

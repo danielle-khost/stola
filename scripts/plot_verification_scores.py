@@ -36,7 +36,7 @@ Score definitions (see synteny_verification.md on the verification-dev branch):
                 each side.
 
 Requires matplotlib (`pip install matplotlib` or `pip install .[viz]`) and
-networkx, in addition to the toga4cnee package itself.
+networkx, in addition to the tunic package itself.
 
 Example:
     PYTHONPATH=src python scripts/plot_verification_scores.py \\
@@ -61,10 +61,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from toga4cnee.bed import parse_bed
-from toga4cnee.chain import iter_chain_blocks
-from toga4cnee.index import load_index
-from toga4cnee.orthology import (
+from tunic.bed import parse_bed
+from tunic.chain import iter_chain_blocks
+from tunic.index import load_index
+from tunic.orthology import (
     Projection,
     _build_orthology_graph,
     _cluster_query_projections,
@@ -74,9 +74,9 @@ from toga4cnee.orthology import (
     _read_projection_evidence,
     _ref_node,
 )
-from toga4cnee.sequence_compare import SequenceComparator, aligned_segments_for_interval
-from toga4cnee.summary import is_solid_match
-from toga4cnee.synteny import (
+from tunic.sequence_compare import SequenceComparator, aligned_segments_for_interval
+from tunic.summary import is_solid_match
+from tunic.synteny import (
     BlockIndex,
     QueryNeighborIndex,
     RefNeighborIndex,
