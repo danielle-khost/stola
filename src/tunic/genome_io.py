@@ -17,6 +17,7 @@ query (or vice versa) just works.
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -33,6 +34,84 @@ def sniff_genome_format(path: str | Path) -> str:
             if int.from_bytes(data, byteorder) == TWOBIT_SIGNATURE:
                 return "twobit"
     return "fasta"
+
+
+def check_twobit_complete(path: str | Path) -> None:
+    """Raise ValueError if a .2bit file is shorter than its own index says.
+
+    Biopython's TwoBitIterator doesn't notice truncation: a record whose
+    offset lies past end-of-file decodes from empty reads as a zero-length
+    sequence, so a partially downloaded .2bit (which keeps its full name
+    index, since that's at the front of the file) opens without complaint
+    and only fails much later, as an "Invalid interval ... for sequence
+    length 0" from whichever fetch() first lands on a missing chromosome.
+    This walks the index and checks that every record's header and packed
+    bases fit inside the file.
+    """
+    path = Path(path)
+    size = path.stat().st_size
+
+    def _truncated(detail: str) -> ValueError:
+        return ValueError(
+            f"{path} is truncated ({size:,} bytes): {detail}. This usually "
+            "means an interrupted download -- re-download the file (`wget -c "
+            "URL` resumes a partial one) and rerun."
+        )
+
+    with path.open("rb") as handle:
+
+        def _read(count: int) -> bytes:
+            data = handle.read(count)
+            if len(data) < count:
+                raise _truncated("the file ends inside its sequence-name index")
+            return data
+
+        header = _read(16)
+        for order in ("<", ">"):
+            signature, version, seq_count, _ = struct.unpack(f"{order}IIII", header)
+            if signature == TWOBIT_SIGNATURE:
+                break
+        else:
+            return  # Not a .2bit; TwoBitIterator reports the bad signature.
+        if version not in (0, 1):
+            return  # TwoBitIterator rejects unknown versions with its own message.
+        offset_format = f"{order}Q" if version == 1 else f"{order}I"
+        offset_size = struct.calcsize(offset_format)
+
+        index: list[tuple[str, int]] = []
+        for _ in range(seq_count):
+            name = _read(_read(1)[0]).decode("ascii", errors="replace")
+            (offset,) = struct.unpack(offset_format, _read(offset_size))
+            index.append((name, offset))
+
+        incomplete: list[str] = []
+        for name, offset in index:
+            # Record layout: dnaSize, nBlockCount, nBlock starts+sizes,
+            # maskBlockCount, mask starts+sizes, reserved, then 4 bases/byte.
+            handle.seek(offset)
+            fixed = handle.read(8)
+            if len(fixed) < 8:
+                incomplete.append(name)
+                continue
+            dna_size, n_block_count = struct.unpack(f"{order}II", fixed)
+            handle.seek(offset + 8 + 8 * n_block_count)
+            mask_count_bytes = handle.read(4)
+            if len(mask_count_bytes) < 4:
+                incomplete.append(name)
+                continue
+            (mask_block_count,) = struct.unpack(f"{order}I", mask_count_bytes)
+            record_end = (
+                offset + 8 + 8 * n_block_count + 4 + 8 * mask_block_count + 4
+                + (dna_size + 3) // 4
+            )
+            if record_end > size:
+                incomplete.append(name)
+
+    if incomplete:
+        raise _truncated(
+            f"{len(incomplete)} of {seq_count} sequences extend past the end "
+            f"of the file, starting with {incomplete[0]!r}"
+        )
 
 
 def _strip_version(seq_id: str) -> str:
@@ -244,6 +323,7 @@ class TwoBitAccessor:
             ) from exc
 
         self.twobit_path = Path(twobit_path)
+        check_twobit_complete(self.twobit_path)
         self._iterator = TwoBitIterator(str(self.twobit_path))
         self.sequences = self._iterator.sequences
         self.aliases = _build_aliases(self.sequences.keys())
@@ -327,6 +407,7 @@ def _iter_twobit_sequences(path: str | Path) -> Iterator[tuple[str, str]]:
             "Activate the biopython conda environment or install biopython."
         ) from exc
 
+    check_twobit_complete(path)
     iterator = TwoBitIterator(str(path))
     try:
         for name, seq in iterator.sequences.items():

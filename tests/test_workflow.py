@@ -2156,6 +2156,37 @@ class WorkflowTests(unittest.TestCase):
             finally:
                 accessor.close()
 
+    def test_truncated_twobit_is_rejected_when_opened(self) -> None:
+        from tunic.genome_io import TwoBitAccessor, check_twobit_complete, iter_named_sequences
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            twobit = tmp_path / "genome.2bit"
+            # Mimic an interrupted download: the name index at the front of
+            # the file survives, chr1 is whole, chr2 is cut mid-sequence, and
+            # chr3 starts past end-of-file (which Biopython alone silently
+            # reads back as a zero-length sequence). Each record here is 16
+            # header bytes + 10 packed bytes, so dropping the last 31 bytes
+            # removes all of chr3 and the final 5 bytes of chr2.
+            _write_twobit(twobit, {name: "ACGT" * 10 for name in ("chr1", "chr2", "chr3")})
+            full = twobit.read_bytes()
+            check_twobit_complete(twobit)
+            twobit.write_bytes(full[:-31])
+
+            with self.assertRaises(ValueError) as ctx:
+                TwoBitAccessor(twobit)
+            self.assertIn("truncated", str(ctx.exception))
+            self.assertIn("2 of 3 sequences", str(ctx.exception))
+            self.assertIn("'chr2'", str(ctx.exception))
+            with self.assertRaises(ValueError):
+                list(iter_named_sequences(twobit))
+
+            # Cut inside the name index itself (16-byte header + partial index).
+            twobit.write_bytes(full[:20])
+            with self.assertRaises(ValueError) as ctx:
+                check_twobit_complete(twobit)
+            self.assertIn("sequence-name index", str(ctx.exception))
+
     def test_open_genome_accessor_dispatches_on_sniffed_format(self) -> None:
         from tunic.genome_io import FastaAccessor, TwoBitAccessor, open_genome_accessor
 
