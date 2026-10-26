@@ -1,4 +1,4 @@
-{% set name = "tunic" %}
+{% set name = "stola" %}
 {% set version = "0.3.0" %}
 
 package:
@@ -17,8 +17,8 @@ build:
   noarch: python
   script: {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
   entry_points:
-    - tunic = tunic.cli:main
-    - tunic-compare-cross-orthology = tunic.cross_orthology:main
+    - stola = stola.cli:main
+    - stola-compare-cross-orthology = stola.cross_orthology:main
   run_exports:
     - {{ pin_subpackage(name, max_pin="x.x") }}
 
@@ -39,11 +39,11 @@ requirements:
 
 test:
   imports:
-    - tunic
-    - tunic.cross_orthology
+    - stola
+    - stola.cross_orthology
   commands:
-    - tunic --help
-    - tunic-compare-cross-orthology --help
+    - stola --help
+    - stola-compare-cross-orthology --help
     - pip check
   requires:
     - pip

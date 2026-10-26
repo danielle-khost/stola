@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Exploratory summary of "lost" CNEEs, per tests/tunic_lost_verification.png.
+"""Exploratory summary of "lost" CNEEs, per tests/stola_lost_verification.png.
 
 For every reference CNEE with candidate chain(s) but zero aligned query bases
 (the "lost" category), looks at the chain gap it sits inside -- bounded by
@@ -47,11 +47,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from tunic.chain import iter_chain_blocks
-from tunic.index import load_index
-from tunic.models import ChainBlock, ChainRecord
-from tunic.genome_io import FastaAccessor
-from tunic.synteny import BlockIndex, _flanking_blocks
+from stola.chain import iter_chain_blocks
+from stola.index import load_index
+from stola.models import ChainBlock, ChainRecord
+from stola.genome_io import FastaAccessor
+from stola.chain import BlockIndex, _flanking_blocks
 
 OUT_COLUMNS = [
     "ref_cnee_id",

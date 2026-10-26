@@ -6,9 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from tunic.bed import bed_missing_name_column, parse_bed, write_named_bed
-from tunic.chain import iter_chain_blocks, parse_chain_header
-from tunic.intervals import overlap_length
+from stola.bed import bed_missing_name_column, parse_bed, write_named_bed
+from stola.chain import iter_chain_blocks, parse_chain_header
+from stola.intervals import overlap_length
 
 
 class ParserTests(unittest.TestCase):

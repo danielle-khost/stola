@@ -1,4 +1,4 @@
-# Utility: compare_cross_orthology (`tunic-compare-cross-orthology`, src/tunic/cross_orthology.py)
+# Utility: compare_cross_orthology (`stola-compare-cross-orthology`, src/stola/cross_orthology.py)
 Goal: take output across multiple runs of pipeline using same reference vs different queries and for each reference CNEE collect orthology status in each run + summary stats, optionally extract FASTA sequence of shared one2one orthologs.
 
 MODULARIZE INTO MODES:

@@ -1,11 +1,10 @@
-"""Single-command TUNIC workflow runner."""
+"""Single-command STOLA workflow runner."""
 
 from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 from .bed import bed_missing_name_column, parse_bed, write_named_bed
 from .candidates import write_candidates
@@ -23,18 +22,10 @@ from .orthology import (
 from .overlap import write_overlap_stats
 from .plots import OrthologySummaryResult, PlotResult, write_orthology_summary, write_qc_plots
 from .sequence_compare import SequenceComparator
-from .synteny import (
-    DEFAULT_FLANK_SIZES,
-    SyntenyResult,
-    write_synteny_neighbor_verification,
-    write_synteny_verification,
-)
 from .summary import summarize_overlap_stats
 
 # Fixed output layout under --outdir -- see the README's Output section. Not individually
-# overridable; --outdir is the only output-location knob the CLI exposes. The
-# synteny reports are exploratory/diagnostic, not main output, so they live
-# under work/ alongside the other intermediates rather than in outdir itself.
+# overridable; --outdir is the only output-location knob the CLI exposes.
 QUERY_BED_FILENAME = "query_cnees.bed"
 STATS_FILENAME = "overlap_stats.tsv"
 # Summary tables and QC plots, under SUMMARY_DIRNAME (plus the orthology
@@ -44,8 +35,6 @@ SUMMARY_FILENAME = "overlap_stats.summary.tsv"
 ALIGNMENT_HISTOGRAM_FILENAME = "num_query_alignments.svg"
 OVERLAP_DENSITY_FILENAME = "overlap_fraction_density.svg"
 SEQUENCE_IDENTITY_DENSITY_FILENAME = "sequence_identity_density.svg"
-SYNTENY_FILENAME = "overlap_stats.synteny.tsv"
-SYNTENY_NEIGHBORS_FILENAME = "overlap_stats.synteny_neighbors.tsv"
 QUERY_ORTHOLOGY_FILENAME = "query_ortho_status.tsv"
 PRUNED_PROJECTIONS_FILENAME = "pruned_query_projections.tsv"
 REF_ORTHOLOGY_FILENAME = "ref_ortho_status.tsv"
@@ -63,8 +52,6 @@ class WorkflowResult:
     summary_plots: PlotResult
     orthology_summary: OrthologySummaryResult
     orthology_result: OrthologyResult
-    synteny_result: SyntenyResult
-    synteny_neighbor_result: SyntenyResult
     outdir: Path
     index_path: Path
     candidates_path: Path
@@ -72,8 +59,6 @@ class WorkflowResult:
     stats_path: Path
     summary_dir: Path
     summary_path: Path
-    synteny_path: Path
-    synteny_neighbors_path: Path
     orthology_path: Path
     culled_projections_path: Path
     ref_cnees_path: Path
@@ -87,8 +72,6 @@ def run_workflow(
     query_fasta: str | Path,
     outdir: str | Path = ".",
     query_id_prefix: str = DEFAULT_QUERY_ID_PREFIX,
-    synteny_flank_sizes: Sequence[int] = DEFAULT_FLANK_SIZES,
-    synteny_max_one2one_controls: int = 50000,
     min_sequence_identity: float = 0.7,
     max_fraction_gap: float = 0.1,
     filter_multi_projections: bool = True,
@@ -99,11 +82,6 @@ def run_workflow(
     min_gap_length: int = DEFAULT_MIN_GAP_LENGTH,
 ) -> WorkflowResult:
     """Run the full chain/CNEE workflow, writing every output under outdir."""
-    if not synteny_flank_sizes or any(size < 0 for size in synteny_flank_sizes):
-        raise ValueError("synteny_flank_sizes must be one or more non-negative values")
-    if synteny_max_one2one_controls < 0:
-        raise ValueError("synteny_max_one2one_controls must be non-negative")
-
     outdir_path = Path(outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
     work_dir = outdir_path / WORK_DIRNAME
@@ -114,8 +92,6 @@ def run_workflow(
     summary_dir = outdir_path / SUMMARY_DIRNAME
     summary_dir.mkdir(parents=True, exist_ok=True)
     out_summary = summary_dir / SUMMARY_FILENAME
-    out_synteny = work_dir / SYNTENY_FILENAME
-    out_synteny_neighbors = work_dir / SYNTENY_NEIGHBORS_FILENAME
     out_orthology = outdir_path / QUERY_ORTHOLOGY_FILENAME
     out_culled_projections = outdir_path / PRUNED_PROJECTIONS_FILENAME
     out_ref_cnees = outdir_path / REF_ORTHOLOGY_FILENAME
@@ -165,30 +141,6 @@ def run_workflow(
             out_ref_cnees=out_ref_cnees,
             query_id_prefix=query_id_prefix,
         )
-        synteny_result = write_synteny_verification(
-            index_path,
-            out_stats,
-            out_bed,
-            out_orthology,
-            cnee_bed,
-            out_synteny,
-            flank_sizes=synteny_flank_sizes,
-            min_sequence_identity=min_sequence_identity,
-            max_fraction_gap=max_fraction_gap,
-            max_one2one_controls=synteny_max_one2one_controls,
-            sequence_comparator=sequence_comparator,
-        )
-        synteny_neighbor_result = write_synteny_neighbor_verification(
-            index_path,
-            out_stats,
-            out_bed,
-            out_orthology,
-            cnee_bed,
-            out_synteny_neighbors,
-            min_sequence_identity=min_sequence_identity,
-            max_fraction_gap=max_fraction_gap,
-            max_one2one_controls=synteny_max_one2one_controls,
-        )
         summary_count = summarize_overlap_stats(
             out_stats,
             out_summary,
@@ -217,8 +169,6 @@ def run_workflow(
         summary_plots=summary_plots,
         orthology_summary=orthology_summary,
         orthology_result=orthology_result,
-        synteny_result=synteny_result,
-        synteny_neighbor_result=synteny_neighbor_result,
         outdir=outdir_path,
         index_path=index_path,
         candidates_path=candidates_path,
@@ -226,8 +176,6 @@ def run_workflow(
         stats_path=out_stats,
         summary_dir=summary_dir,
         summary_path=out_summary,
-        synteny_path=out_synteny,
-        synteny_neighbors_path=out_synteny_neighbors,
         orthology_path=out_orthology,
         culled_projections_path=out_culled_projections,
         ref_cnees_path=out_ref_cnees,

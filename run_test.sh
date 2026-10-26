@@ -9,7 +9,7 @@ REFFASTA="tests/GCF_016699485.2_bGalGal1.mat.broiler.GRCg7b_genomic.fna"
 QUERYFASTA="tests/GCA_031468815.1_bMorBas2.hap2_genomic.fna"
 PREFIX="morBass"
 
-PYTHONPATH=src python -m tunic.cli \
+PYTHONPATH=src python -m stola.cli \
   $CHAIN \
   $REFBED \
   $REFFASTA \
@@ -19,7 +19,7 @@ PYTHONPATH=src python -m tunic.cli \
   --min-sequence-identity 0.7
 
 
-python tests/plot_tunic_outputs.py \
+python tests/plot_stola_outputs.py \
   --summary ${OUTPATH}/summary_figures/overlap_stats.summary.tsv \
   --stats ${OUTPATH}/overlap_stats.tsv \
   --orthology ${OUTPATH}/query_ortho_status.tsv \

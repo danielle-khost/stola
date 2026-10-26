@@ -9,12 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from tunic.candidates import write_candidates
-from tunic.index import build_index, load_index
-from tunic.overlap import calculate_overlap_rows, write_overlap_stats
-from tunic.sequence_compare import SequenceComparator
-from tunic.summary import summarize_overlap_stats
-from tunic.workflow import run_workflow
+from stola.candidates import write_candidates
+from stola.index import build_index, load_index
+from stola.overlap import calculate_overlap_rows, write_overlap_stats
+from stola.sequence_compare import SequenceComparator
+from stola.summary import summarize_overlap_stats
+from stola.workflow import run_workflow
 
 
 def _has_networkx() -> bool:
@@ -161,7 +161,7 @@ def _classify_with_filtering(
     # Real index -> candidates -> overlap stats -> classify_orthology chain,
     # with multi-projection filtering on. Returns (result, query orthology
     # rows, pruned-projection rows).
-    from tunic.orthology import classify_orthology
+    from stola.orthology import classify_orthology
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     bed = tmp_path / "cnees.bed"
@@ -430,7 +430,7 @@ class WorkflowTests(unittest.TestCase):
     def test_cli_runs_workflow_from_bare_arguments(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from tunic.cli import main
+        from stola.cli import main
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -470,7 +470,7 @@ class WorkflowTests(unittest.TestCase):
             bed_lines = result.query_bed_path.read_text(encoding="utf-8").splitlines()
             summary_rows = _read_tsv(result.summary_path)
             orthology_rows = _read_tsv(result.orthology_path)
-            synteny_rows = _read_tsv(result.synteny_path)
+            work_files = sorted(path.name for path in (tmp_path / "work").iterdir())
             summary_figures = sorted(path.name for path in (tmp_path / "summary_figures").iterdir())
 
         self.assertEqual(result.summary_path, tmp_path / "summary_figures" / "overlap_stats.summary.tsv")
@@ -518,14 +518,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.summary_count, 3)
         self.assertEqual(result.orthology_result.orthology_rows, 3)
         self.assertEqual(result.orthology_result.culled_projection_rows, 2)
-        # 2 synteny candidates (weak + lost; CNEE_PARTIAL no longer has a
-        # one2one control row since it isn't one2one anymore) x 3 default
-        # flank sizes (10000, 1000, 100).
-        self.assertEqual(result.synteny_result.rows, 6)
         self.assertEqual(len(stats_rows), 3)
         self.assertEqual(len(summary_rows), 3)
         self.assertEqual(len(orthology_rows), 3)
-        self.assertEqual(len(synteny_rows), 6)
         self.assertEqual(
             list(orthology_rows[0]),
             ["query_cnee_id", "partner_ref_cnees", "orthology_category", "sequence_identity", "gap_fraction"],
@@ -544,23 +539,8 @@ class WorkflowTests(unittest.TestCase):
         }
         self.assertEqual(summary_statuses["CNEE_GAPPED"], "lost")
         self.assertEqual(summary_statuses["CNEE_NO_CHAIN"], "missing")
-        synteny_statuses = {row["orthology_status"] for row in synteny_rows}
-        self.assertEqual(synteny_statuses, {"weak", "lost"})
-        self.assertEqual(
-            {int(row["flank_size"]) for row in synteny_rows}, {10000, 1000, 100}
-        )
-        # The pruned (non-solid, unverifiable) chrQ projection never got a
-        # graph-assigned query id, so it's reported under its raw projection name.
-        self.assertIn(
-            "CNEE_PARTIAL#1",
-            {row["cnee_uid"] for row in synteny_rows if row["orthology_status"] == "weak"},
-        )
-        # Every CNEE in this fixture is on its own chromosome.
-        for row in synteny_rows:
-            self.assertEqual(row["distance_to_nearest_cnee_neighbor"], ".")
-        for row in synteny_rows:
-            if row["orthology_status"] == "lost":
-                self.assertEqual(row["distance_to_nearest_aligned_block"], "25")
+        # The synteny reports are no longer part of the pipeline.
+        self.assertFalse([name for name in work_files if "synteny" in name])
 
     def test_workflow_leaves_named_ref_bed_path_none_when_input_bed_has_names(self) -> None:
         if not _has_networkx():
@@ -614,7 +594,7 @@ class WorkflowTests(unittest.TestCase):
             self.skipTest("networkx is not installed")
         import networkx as nx
 
-        from tunic.orthology import (
+        from stola.orthology import (
             _build_orthology_graph,
             _cluster_query_projections,
             _read_projection_evidence,
@@ -667,7 +647,7 @@ class WorkflowTests(unittest.TestCase):
     def test_orthology_classification_uses_solid_edges_only(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from tunic.orthology import classify_orthology
+        from stola.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -764,7 +744,7 @@ class WorkflowTests(unittest.TestCase):
     ) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from tunic.orthology import classify_orthology
+        from stola.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -829,7 +809,7 @@ class WorkflowTests(unittest.TestCase):
     def test_classify_orthology_uses_custom_query_id_prefix(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from tunic.orthology import classify_orthology
+        from stola.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -882,7 +862,7 @@ class WorkflowTests(unittest.TestCase):
     def test_classify_orthology_appends_missing_underscore_to_query_id_prefix(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from tunic.orthology import classify_orthology
+        from stola.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1075,7 +1055,7 @@ class WorkflowTests(unittest.TestCase):
     def test_ref_cnee_tsv_splits_lost_by_query_assembly_gap_overlap(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from tunic.orthology import classify_orthology
+        from stola.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1120,7 +1100,7 @@ class WorkflowTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            from tunic.index import build_index
+            from stola.index import build_index
 
             build_index(chain, index)
 
@@ -1215,7 +1195,7 @@ class WorkflowTests(unittest.TestCase):
     def test_ref_cnee_tsv_collapses_lost_categories_without_query_fasta(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from tunic.orthology import classify_orthology
+        from stola.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1240,7 +1220,7 @@ class WorkflowTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            from tunic.index import build_index
+            from stola.index import build_index
 
             build_index(chain, index)
 
@@ -1285,7 +1265,7 @@ class WorkflowTests(unittest.TestCase):
     def test_orthology_clustering_keeps_opposite_strand_overlaps_separate(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from tunic.orthology import classify_orthology
+        from stola.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1345,7 +1325,7 @@ class WorkflowTests(unittest.TestCase):
     def test_duplicate_cnee_ids_are_kept_distinct_via_cnee_uid(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        from tunic.orthology import classify_orthology
+        from stola.orthology import classify_orthology
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1414,573 +1394,8 @@ class WorkflowTests(unittest.TestCase):
         summary_uids = {row["cnee_uid"] for row in summary_rows}
         self.assertEqual(summary_uids, {"CNEE_DUP", "CNEE_DUP__line2"})
 
-    def test_synteny_verification_writes_long_format_rows_per_custom_flank_size(
-        self,
-    ) -> None:
-        if not _has_networkx():
-            self.skipTest("networkx is not installed")
-        from tunic.synteny import write_synteny_verification
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            chain, bed = _write_inputs(tmp_path)
-            index = tmp_path / "index.json"
-            candidates = tmp_path / "candidates.tsv"
-            stats = tmp_path / "overlap_stats.tsv"
-            query_bed = tmp_path / "query_cnees.bed"
-            orthology = tmp_path / "orthology.tsv"
-            synteny = tmp_path / "synteny.tsv"
-
-            build_index(chain, index)
-            write_candidates(index, bed, candidates)
-            write_overlap_stats(index, candidates, stats)
-            from tunic.orthology import classify_orthology
-
-            # This test is about write_synteny_verification's own flank-size
-            # behavior, not multi-projection filtering -- CNEE_PARTIAL's one2many
-            # shape would otherwise need a real sequence_comparator.
-            classify_orthology(stats, bed, index, orthology, query_bed, filter_multi_projections=False)
-
-            result = write_synteny_verification(
-                index,
-                stats,
-                query_bed,
-                orthology,
-                bed,
-                synteny,
-                flank_sizes=(500, 50),
-            )
-            rows = _read_tsv(synteny)
-
-        self.assertEqual(result.rows, len(rows))
-        self.assertGreater(result.rows, 0)
-        # Every candidate gets a row for each requested flank size, and only
-        # the requested sizes -- not the module default.
-        self.assertEqual(result.rows % 2, 0)
-        self.assertEqual({int(row["flank_size"]) for row in rows}, {500, 50})
-        # _write_inputs puts every CNEE on its own chromosome, so none has a
-        # neighboring CNEE.
-        for row in rows:
-            self.assertEqual(row["distance_to_nearest_cnee_neighbor"], ".")
-        # CNEE_GAPPED sits entirely in chain 3's gap between blocks
-        # (100-150) and (250-300); it is 25 bases from each block edge.
-        lost_rows = [row for row in rows if row["orthology_status"] == "lost"]
-        self.assertTrue(lost_rows)
-        for row in lost_rows:
-            self.assertEqual(row["distance_to_nearest_aligned_block"], "25")
-        cnee_uids = {row["cnee_uid"] for row in rows}
-        for cnee_uid in cnee_uids:
-            sizes_for_uid = {
-                int(row["flank_size"]) for row in rows if row["cnee_uid"] == cnee_uid
-            }
-            self.assertEqual(sizes_for_uid, {500, 50})
-
-    def test_distance_to_nearest_block_handles_overlap_and_gaps(self) -> None:
-        from tunic.models import ChainBlock
-        from tunic.synteny import BlockIndex, _distance_to_nearest_block
-
-        blocks = BlockIndex.from_blocks(
-            [
-                ChainBlock(ref_start=100, ref_end=150, query_start=0, query_end=50),
-                ChainBlock(ref_start=250, ref_end=300, query_start=50, query_end=100),
-            ]
-        )
-
-        self.assertEqual(_distance_to_nearest_block(blocks, 120, 140), 0)
-        self.assertEqual(_distance_to_nearest_block(blocks, 175, 225), 25)
-        self.assertEqual(_distance_to_nearest_block(blocks, 180, 200), 30)
-        self.assertEqual(_distance_to_nearest_block(blocks, 0, 50), 50)
-        self.assertEqual(_distance_to_nearest_block(blocks, 350, 400), 50)
-
-    def test_nearest_cnee_neighbor_distances_computes_gaps_on_same_chromosome(
-        self,
-    ) -> None:
-        from tunic.synteny import _nearest_cnee_neighbor_distances
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bed = Path(tmpdir) / "cnees.bed"
-            bed.write_text(
-                "chr1\t0\t50\tA\n"
-                "chr1\t100\t150\tB\n"
-                "chr1\t500\t550\tC\n"
-                "chr2\t0\t10\tD\n",
-                encoding="utf-8",
-            )
-
-            distances = _nearest_cnee_neighbor_distances(bed)
-
-        self.assertEqual(distances["A"], 50)
-        self.assertEqual(distances["B"], 50)
-        self.assertEqual(distances["C"], 350)
-        self.assertIsNone(distances["D"])
-
-    def test_synteny_selection_caps_one2one_controls(self) -> None:
-        from tunic.synteny import _select_synteny_targets
-
-        rows = [
-            {
-                "cnee_id": "CNEE_A",
-                "cnee_uid": "CNEE_A",
-                "aligned_bases": "10",
-                "gap_fraction_within_chain_span": "0.0",
-                "seq_identity": "1.0",
-                "query_chrom": "chrQ",
-                "query_aligned_start": "10",
-                "query_aligned_end": "20",
-            },
-            {
-                "cnee_id": "CNEE_B",
-                "cnee_uid": "CNEE_B",
-                "aligned_bases": "10",
-                "gap_fraction_within_chain_span": "0.0",
-                "seq_identity": "1.0",
-                "query_chrom": "chrQ",
-                "query_aligned_start": "30",
-                "query_aligned_end": "40",
-            },
-        ]
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            query_bed = tmp_path / "query.bed"
-            orthology = tmp_path / "orthology.tsv"
-            query_bed.write_text(
-                "chrQ\t10\t20\tq_CNEE_A\t0\t+\n"
-                "chrQ\t30\t40\tq_CNEE_B\t0\t+\n",
-                encoding="utf-8",
-            )
-            orthology.write_text(
-                "query_cnee_id\tpartner_ref_cnees\torthology_category\n"
-                "q_CNEE_A\tCNEE_A\tone2one\n"
-                "q_CNEE_B\tCNEE_B\tone2one\n",
-                encoding="utf-8",
-            )
-
-            targets = _select_synteny_targets(
-                rows,
-                query_bed,
-                orthology,
-                min_sequence_identity=0.7,
-                max_fraction_gap=0.1,
-                max_one2one_controls=1,
-            )
-
-        self.assertEqual(len(targets), 1)
-        self.assertEqual(targets[0].status, "one2one")
-        self.assertEqual(targets[0].output_id, "q_CNEE_A")
-
-    def test_ref_neighbor_index_directional_lookup_and_chromosome_edges(self) -> None:
-        from tunic.synteny import RefNeighborIndex
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bed = Path(tmpdir) / "cnees.bed"
-            bed.write_text(
-                "chr1\t0\t50\tA\n"
-                "chr1\t100\t150\tB\n"
-                "chr1\t500\t550\tC\n"
-                "chr2\t0\t10\tD\n",
-                encoding="utf-8",
-            )
-            index = RefNeighborIndex.from_bed(bed)
-
-        self.assertEqual(index.neighbor("B", "left"), ("A", 50))
-        self.assertEqual(index.neighbor("B", "right"), ("C", 350))
-        self.assertEqual(index.neighbor("A", "left"), (None, None))
-        self.assertEqual(index.neighbor("C", "right"), (None, None))
-        self.assertEqual(index.neighbor("D", "left"), (None, None))
-        self.assertEqual(index.neighbor("D", "right"), (None, None))
-
-    def test_query_neighbor_index_directional_lookup(self) -> None:
-        from tunic.synteny import QueryBedRecord, QueryNeighborIndex
-
-        by_chrom = {
-            "chrQ": [
-                QueryBedRecord(chrom="chrQ", start=0, end=50, query_id="qA"),
-                QueryBedRecord(chrom="chrQ", start=200, end=250, query_id="qB"),
-            ]
-        }
-        index = QueryNeighborIndex.from_records(by_chrom)
-
-        self.assertEqual(index.neighbor("chrQ", 100, "before"), ("qA", 50))
-        self.assertEqual(index.neighbor("chrQ", 100, "after"), ("qB", 100))
-        self.assertEqual(index.neighbor("chrQ", 10, "before"), (None, None))
-        self.assertEqual(index.neighbor("chrQ2", 10, "before"), (None, None))
-
-    def test_orthology_index_assigns_category_to_every_partner_ref(self) -> None:
-        from tunic.synteny import OrthologyIndex
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            orthology = Path(tmpdir) / "orthology.tsv"
-            orthology.write_text(
-                "query_cnee_id\tpartner_ref_cnees\torthology_category\n"
-                "q_many\tCNEE_X,CNEE_Y\tmany2one\n"
-                "NA\tCNEE_LOST\tlost\n",
-                encoding="utf-8",
-            )
-            index = OrthologyIndex.from_path(orthology)
-
-        self.assertEqual(index.category_by_ref_uid["CNEE_X"], "many2one")
-        self.assertEqual(index.category_by_ref_uid["CNEE_Y"], "many2one")
-        self.assertEqual(index.category_by_ref_uid["CNEE_LOST"], "lost")
-        self.assertEqual(index.category_by_query_id["q_many"], "many2one")
-        self.assertEqual(
-            index.ref_partners_by_query_id["q_many"], frozenset({"CNEE_X", "CNEE_Y"})
-        )
-        self.assertNotIn("NA", index.category_by_query_id)
-
-    def test_query_flank_anchors_own_interval_forward_and_reverse_strand(self) -> None:
-        from tunic.models import ChainRecord
-        from tunic.synteny import BlockIndex, _query_flank_anchors
-
-        blocks = BlockIndex.from_blocks([])
-        row = {
-            "query_aligned_start": "100",
-            "query_aligned_end": "200",
-            "ref_start": "0",
-            "ref_end": "50",
-        }
-
-        def _record(query_strand: str) -> ChainRecord:
-            return ChainRecord(
-                chain_id="1",
-                score=0,
-                ref_chrom="chr1",
-                ref_size=1000,
-                ref_strand="+",
-                ref_start=0,
-                ref_end=50,
-                query_chrom="chrQ",
-                query_size=1000,
-                query_strand=query_strand,
-                query_start=100,
-                query_end=200,
-                start_byte=0,
-                byte_length=0,
-            )
-
-        forward = _query_flank_anchors(row, _record("+"), blocks)
-        self.assertEqual(forward["left"], (100, "before"))
-        self.assertEqual(forward["right"], (200, "after"))
-
-        reverse = _query_flank_anchors(row, _record("-"), blocks)
-        self.assertEqual(reverse["left"], (200, "after"))
-        self.assertEqual(reverse["right"], (100, "before"))
-
-    def test_query_flank_anchors_interpolates_from_flanking_blocks_for_lost_candidates(
-        self,
-    ) -> None:
-        from tunic.models import ChainBlock, ChainRecord
-        from tunic.synteny import BlockIndex, _query_flank_anchors
-
-        blocks = BlockIndex.from_blocks(
-            [
-                ChainBlock(ref_start=0, ref_end=100, query_start=1000, query_end=1100),
-                ChainBlock(ref_start=300, ref_end=400, query_start=1200, query_end=1300),
-            ]
-        )
-        row = {
-            "query_aligned_start": ".",
-            "query_aligned_end": ".",
-            "ref_start": "200",
-            "ref_end": "250",
-        }
-
-        def _record(query_strand: str) -> ChainRecord:
-            return ChainRecord(
-                chain_id="1",
-                score=0,
-                ref_chrom="chr1",
-                ref_size=1000,
-                ref_strand="+",
-                ref_start=0,
-                ref_end=400,
-                query_chrom="chrQ",
-                query_size=1000,
-                query_strand=query_strand,
-                query_start=1000,
-                query_end=1300,
-                start_byte=0,
-                byte_length=0,
-            )
-
-        forward = _query_flank_anchors(row, _record("+"), blocks)
-        self.assertEqual(forward["left"], (1100, "before"))
-        self.assertEqual(forward["right"], (1200, "after"))
-
-        reverse = _query_flank_anchors(row, _record("-"), blocks)
-        self.assertEqual(reverse["left"], (1000, "after"))
-        self.assertEqual(reverse["right"], (1300, "before"))
-
-        # A gap at the very edge of the chain's own aligned span: no
-        # preceding block on the left, so that side is undeterminable
-        # regardless of strand.
-        edge_blocks = BlockIndex.from_blocks(
-            [ChainBlock(ref_start=300, ref_end=400, query_start=1200, query_end=1300)]
-        )
-        edge_row = {
-            "query_aligned_start": ".",
-            "query_aligned_end": ".",
-            "ref_start": "0",
-            "ref_end": "50",
-        }
-        edge_forward = _query_flank_anchors(edge_row, _record("+"), edge_blocks)
-        self.assertEqual(edge_forward["left"], (None, None))
-        self.assertEqual(edge_forward["right"], (1200, "after"))
-        edge_reverse = _query_flank_anchors(edge_row, _record("-"), edge_blocks)
-        self.assertEqual(edge_reverse["left"], (None, None))
-        self.assertEqual(edge_reverse["right"], (1300, "before"))
-
-    def _write_lost_candidate_fixture(self, tmp_path: Path) -> tuple[Path, Path]:
-        # A chain with a single gap (ref 100-300 <-> query 1100-1200) and three
-        # reference CNEEs: CNEE_A and CNEE_C flank the gap and align solidly to
-        # either side of it; CNEE_B sits entirely inside the gap ("lost").
-        chain_text = "\n".join(
-            [
-                "chain 100 chr1 1000 + 0 400 chrQ 1000 + 1000 1300 10",
-                "100 200 100",
-                "100",
-                "",
-            ]
-        )
-        chain = tmp_path / "gap.chain"
-        bed = tmp_path / "gap_cnees.bed"
-        chain.write_text(chain_text, encoding="utf-8")
-        bed.write_text(
-            "chr1\t0\t50\tCNEE_A\n"
-            "chr1\t200\t250\tCNEE_B\n"
-            "chr1\t350\t400\tCNEE_C\n",
-            encoding="utf-8",
-        )
-        return chain, bed
-
-    def test_synteny_neighbor_verification_matches_true_when_query_neighbors_are_ref_neighbors_orthologs(
-        self,
-    ) -> None:
-        if not _has_networkx():
-            self.skipTest("networkx is not installed")
-        from tunic.orthology import classify_orthology
-        from tunic.synteny import write_synteny_neighbor_verification
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            chain, bed = self._write_lost_candidate_fixture(tmp_path)
-            index = tmp_path / "index.json"
-            candidates = tmp_path / "candidates.tsv"
-            stats = tmp_path / "overlap_stats.tsv"
-            query_bed = tmp_path / "query_cnees.bed"
-            orthology = tmp_path / "orthology.tsv"
-            synteny_neighbors = tmp_path / "synteny_neighbors.tsv"
-
-            build_index(chain, index)
-            write_candidates(index, bed, candidates)
-            write_overlap_stats(index, candidates, stats)
-            classify_orthology(stats, bed, index, orthology, query_bed)
-
-            result = write_synteny_neighbor_verification(
-                index, stats, query_bed, orthology, bed, synteny_neighbors
-            )
-            rows = _read_tsv(synteny_neighbors)
-
-        self.assertEqual(result.rows, len(rows))
-        by_flank = {
-            (row["cnee_uid"], row["flank"]): row
-            for row in rows
-            if row["orthology_status"] == "lost"
-        }
-        left = by_flank[("CNEE_B", "left")]
-        right = by_flank[("CNEE_B", "right")]
-
-        self.assertEqual(left["nearest_ref_cnee_id"], "CNEE_A")
-        self.assertEqual(left["distance_to_ref_cnee"], "150")
-        self.assertEqual(left["nearest_ref_cnee_status"], "one2one")
-        self.assertEqual(left["nearest_query_cnee_id"], "q_CNEE_A")
-        self.assertEqual(left["distance_to_query_cnee"], "50")
-        self.assertEqual(left["nearest_query_cnee_status"], "one2one")
-        self.assertEqual(left["synteny_matches"], "TRUE")
-
-        self.assertEqual(right["nearest_ref_cnee_id"], "CNEE_C")
-        self.assertEqual(right["distance_to_ref_cnee"], "100")
-        self.assertEqual(right["nearest_query_cnee_id"], "q_CNEE_C")
-        self.assertEqual(right["distance_to_query_cnee"], "50")
-        self.assertEqual(right["synteny_matches"], "TRUE")
-
-        # CNEE_B is "lost" -- no query projection exists at all.
-        self.assertEqual(left["ref_coordinates"], "chr1:200-250")
-        self.assertEqual(left["query_projection_id"], "NA")
-        self.assertEqual(left["query_projection_coordinates"], "NA")
-
-        # CNEE_A and CNEE_C are themselves solid one2one candidates (positive
-        # controls), each with a real graph-assigned query projection.
-        by_status = {row["cnee_uid"]: row for row in rows if row["orthology_status"] == "one2one"}
-        self.assertEqual(by_status["CNEE_A"]["ref_coordinates"], "chr1:0-50")
-        self.assertEqual(by_status["CNEE_A"]["query_projection_id"], "q_CNEE_A")
-        self.assertEqual(
-            by_status["CNEE_A"]["query_projection_coordinates"], "chrQ:1000-1050"
-        )
-        self.assertEqual(by_status["CNEE_C"]["query_projection_id"], "q_CNEE_C")
-        self.assertEqual(
-            by_status["CNEE_C"]["query_projection_coordinates"], "chrQ:1250-1300"
-        )
-
-    def test_candidate_query_projection_by_status(self) -> None:
-        from tunic.synteny import SyntenyTarget, _candidate_query_projection
-
-        lost_target = SyntenyTarget(
-            row={
-                "query_aligned_start": ".",
-                "query_aligned_end": ".",
-                "query_chrom": "chrQ",
-                "query_projection_name": "CNEE_LOST#1",
-            },
-            status="lost",
-            output_id="CNEE_LOST",
-        )
-        self.assertEqual(_candidate_query_projection(lost_target), ("NA", "NA"))
-
-        uncertain_target = SyntenyTarget(
-            row={
-                "query_aligned_start": "100",
-                "query_aligned_end": "150",
-                "query_chrom": "chrQ",
-                "query_projection_name": "CNEE_UNC#2",
-            },
-            status="uncertain_loss",
-            output_id="CNEE_UNC",
-        )
-        self.assertEqual(
-            _candidate_query_projection(uncertain_target),
-            ("CNEE_UNC#2", "chrQ:100-150"),
-        )
-
-        weak_target = SyntenyTarget(
-            row={
-                "query_aligned_start": "200",
-                "query_aligned_end": "250",
-                "query_chrom": "chrQ",
-                "query_projection_name": "CNEE_WEAK#3",
-            },
-            status="weak",
-            output_id="q_CNEE_WEAK_1",
-        )
-        self.assertEqual(
-            _candidate_query_projection(weak_target),
-            ("q_CNEE_WEAK_1", "chrQ:200-250"),
-        )
-
-        one2one_target = SyntenyTarget(
-            row={
-                "query_aligned_start": "300",
-                "query_aligned_end": "350",
-                "query_chrom": "chrQ",
-                "query_projection_name": "CNEE_ONE#4",
-            },
-            status="one2one",
-            output_id="q_CNEE_ONE",
-        )
-        self.assertEqual(
-            _candidate_query_projection(one2one_target),
-            ("q_CNEE_ONE", "chrQ:300-350"),
-        )
-
-    def test_synteny_neighbor_verification_flags_mismatch_for_rearranged_query_neighbor(
-        self,
-    ) -> None:
-        from tunic.synteny import write_synteny_neighbor_verification
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            chain, bed = self._write_lost_candidate_fixture(tmp_path)
-            index = tmp_path / "index.json"
-            candidates = tmp_path / "candidates.tsv"
-            stats = tmp_path / "overlap_stats.tsv"
-            query_bed = tmp_path / "query_cnees.bed"
-            orthology = tmp_path / "orthology.tsv"
-            synteny_neighbors = tmp_path / "synteny_neighbors.tsv"
-
-            build_index(chain, index)
-            write_candidates(index, bed, candidates)
-            write_overlap_stats(index, candidates, stats)
-
-            # Hand-author query BED/orthology so the query CNEE physically
-            # nearest the left side of CNEE_B's projected gap (q_WRONG, right
-            # where CNEE_A's ortholog would sit) is *not* actually derived
-            # from CNEE_A -- simulating a rearrangement. The right side stays
-            # a genuine match.
-            query_bed.write_text(
-                "chrQ\t1000\t1050\tq_WRONG\t0\t+\n"
-                "chrQ\t1250\t1300\tq_CNEE_C\t0\t+\n",
-                encoding="utf-8",
-            )
-            orthology.write_text(
-                "query_cnee_id\tpartner_ref_cnees\torthology_category\n"
-                "q_WRONG\tCNEE_OTHER\tone2one\n"
-                "q_CNEE_C\tCNEE_C\tone2one\n",
-                encoding="utf-8",
-            )
-
-            result = write_synteny_neighbor_verification(
-                index, stats, query_bed, orthology, bed, synteny_neighbors
-            )
-            rows = _read_tsv(synteny_neighbors)
-
-        self.assertEqual(result.rows, len(rows))
-        by_flank = {
-            (row["cnee_uid"], row["flank"]): row
-            for row in rows
-            if row["orthology_status"] == "lost"
-        }
-        left = by_flank[("CNEE_B", "left")]
-        right = by_flank[("CNEE_B", "right")]
-
-        self.assertEqual(left["nearest_ref_cnee_id"], "CNEE_A")
-        self.assertEqual(left["nearest_query_cnee_id"], "q_WRONG")
-        self.assertEqual(left["synteny_matches"], "FALSE")
-
-        self.assertEqual(right["nearest_ref_cnee_id"], "CNEE_C")
-        self.assertEqual(right["nearest_query_cnee_id"], "q_CNEE_C")
-        self.assertEqual(right["synteny_matches"], "TRUE")
-
-    def test_synteny_neighbor_verification_reports_dot_when_undeterminable(self) -> None:
-        from tunic.synteny import write_synteny_neighbor_verification
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            chain, bed = self._write_lost_candidate_fixture(tmp_path)
-            index = tmp_path / "index.json"
-            candidates = tmp_path / "candidates.tsv"
-            stats = tmp_path / "overlap_stats.tsv"
-            query_bed = tmp_path / "query_cnees.bed"
-            orthology = tmp_path / "orthology.tsv"
-            synteny_neighbors = tmp_path / "synteny_neighbors.tsv"
-
-            build_index(chain, index)
-            write_candidates(index, bed, candidates)
-            write_overlap_stats(index, candidates, stats)
-            # No query BED / orthology rows at all -- every neighbor lookup
-            # comes up empty, so nothing can be resolved.
-            query_bed.write_text("", encoding="utf-8")
-            orthology.write_text(
-                "query_cnee_id\tpartner_ref_cnees\torthology_category\n",
-                encoding="utf-8",
-            )
-
-            result = write_synteny_neighbor_verification(
-                index, stats, query_bed, orthology, bed, synteny_neighbors
-            )
-            rows = _read_tsv(synteny_neighbors)
-
-        self.assertEqual(result.rows, len(rows))
-        lost_rows = [row for row in rows if row["orthology_status"] == "lost"]
-        self.assertTrue(lost_rows)
-        for row in lost_rows:
-            self.assertEqual(row["nearest_query_cnee_id"], ".")
-            self.assertEqual(row["distance_to_query_cnee"], ".")
-            self.assertEqual(row["nearest_query_cnee_status"], ".")
-            self.assertEqual(row["synteny_matches"], ".")
-            # Ref-side neighbors are independent of query data and still resolve.
-            self.assertIn(row["nearest_ref_cnee_id"], {"CNEE_A", "CNEE_C"})
-
     def test_orthology_diagnostic_plots_use_category_groups(self) -> None:
-        from tunic.plots import write_orthology_diagnostic_plots
+        from stola.plots import write_orthology_diagnostic_plots
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2043,7 +1458,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Gap fraction by orthology category", gap_text)
 
     def test_multi_alignment_metric_plots_filter_by_summary_counts(self) -> None:
-        from tunic.plots import write_multi_alignment_metric_densities
+        from stola.plots import write_multi_alignment_metric_densities
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2083,7 +1498,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Gap fraction density for multi-query CNEEs", gap_text)
 
     def test_fasta_accessor_fetches_correctly_across_wrapped_lines(self) -> None:
-        from tunic.genome_io import FastaAccessor
+        from stola.genome_io import FastaAccessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2103,7 +1518,7 @@ class WorkflowTests(unittest.TestCase):
                 accessor.close()
 
     def test_fasta_accessor_rejects_ragged_line_wrapping(self) -> None:
-        from tunic.genome_io import FastaAccessor
+        from stola.genome_io import FastaAccessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2121,7 +1536,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("chr1", str(ctx.exception))
 
     def test_sniff_genome_format_detects_twobit_vs_fasta(self) -> None:
-        from tunic.genome_io import sniff_genome_format
+        from stola.genome_io import sniff_genome_format
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2134,7 +1549,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(sniff_genome_format(fasta), "fasta")
 
     def test_twobit_accessor_fetches_bases_n_blocks_and_version_alias(self) -> None:
-        from tunic.genome_io import TwoBitAccessor
+        from stola.genome_io import TwoBitAccessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2157,7 +1572,7 @@ class WorkflowTests(unittest.TestCase):
                 accessor.close()
 
     def test_truncated_twobit_is_rejected_when_opened(self) -> None:
-        from tunic.genome_io import TwoBitAccessor, check_twobit_complete, iter_named_sequences
+        from stola.genome_io import TwoBitAccessor, check_twobit_complete, iter_named_sequences
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2188,7 +1603,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("sequence-name index", str(ctx.exception))
 
     def test_open_genome_accessor_dispatches_on_sniffed_format(self) -> None:
-        from tunic.genome_io import FastaAccessor, TwoBitAccessor, open_genome_accessor
+        from stola.genome_io import FastaAccessor, TwoBitAccessor, open_genome_accessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2209,7 +1624,7 @@ class WorkflowTests(unittest.TestCase):
                 fasta_accessor.close()
 
     def test_iter_n_runs_matches_between_fasta_and_twobit_for_same_content(self) -> None:
-        from tunic.assembly_gaps import iter_n_runs
+        from stola.assembly_gaps import iter_n_runs
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2235,8 +1650,8 @@ class WorkflowTests(unittest.TestCase):
             import Bio  # noqa: F401
         except ImportError:
             self.skipTest("Biopython is not installed")
-        from tunic.chain import iter_chain_blocks
-        from tunic.sequence_compare import aligned_segments_for_interval
+        from stola.chain import iter_chain_blocks
+        from stola.sequence_compare import aligned_segments_for_interval
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2301,7 +1716,7 @@ class WorkflowTests(unittest.TestCase):
             write_candidates(index, bed, candidates)
             comparator = SequenceComparator(ref_fasta, query_fasta, tmp_path)
             try:
-                from tunic.overlap import iter_overlap_rows
+                from stola.overlap import iter_overlap_rows
 
                 seq_rows = list(
                     iter_overlap_rows(

@@ -1,6 +1,6 @@
 """Compare per-reference-CNEE orthology status across multiple pipeline runs.
 
-Takes a list of `tunic` output directories -- the same reference BED
+Takes a list of `stola` output directories -- the same reference BED
 lifted to different query species -- and offers three run modes (see
 dev_docs/compare_cross_orthology.md):
 
@@ -18,7 +18,7 @@ dev_docs/compare_cross_orthology.md):
         with pip, the `cluster` extra); not a dependency of the other two
         modes.
 
-Installed as the `tunic-compare-cross-orthology` command.
+Installed as the `stola-compare-cross-orthology` command.
 """
 
 from __future__ import annotations
@@ -828,7 +828,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
     query_dirs_help = (
-        "Text file listing one tunic output directory per line, optionally "
+        "Text file listing one stola output directory per line, optionally "
         "with tab-separated columns for that run's query genome (FASTA/2bit, "
         "required for FASTA extraction) and a manual species label"
     )

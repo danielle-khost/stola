@@ -58,7 +58,7 @@ class IntervalIndex:
     """Overlap-only lookup, assuming intervals within one file don't overlap
     each other (same non-overlapping-annotation assumption used elsewhere in
     this codebase) -- sort by start and bisect on end, same pattern as
-    synteny.py's BlockIndex.overlapping().
+    chain.py's BlockIndex.overlapping().
     """
 
     def __init__(self, entries: list[BedEntry]) -> None:

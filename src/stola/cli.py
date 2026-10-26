@@ -1,4 +1,4 @@
-"""Command line interface for TUNIC."""
+"""Command line interface for STOLA."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from .orthology import (
     DEFAULT_RELATIVE_SCORE_THRESHOLD,
     DEFAULT_SOFT_DEPTH_LIMIT,
 )
-from .synteny import DEFAULT_FLANK_SIZES
 from .workflow import run_workflow
 
 
@@ -26,8 +25,6 @@ def _run(args: argparse.Namespace) -> None:
         args.query_fasta,
         outdir=args.outdir,
         query_id_prefix=args.query_prefix,
-        synteny_flank_sizes=args.synteny_flank_sizes,
-        synteny_max_one2one_controls=args.synteny_max_one2one_controls,
         min_sequence_identity=args.min_sequence_identity,
         max_fraction_gap=args.max_fraction_gap,
         filter_multi_projections=not args.no_filter_multi_projections,
@@ -66,14 +63,6 @@ def _run(args: argparse.Namespace) -> None:
         f"reason plots/tables -> {result.summary_dir}"
     )
     print(
-        f"Wrote {result.synteny_result.rows} synteny verification rows -> "
-        f"{result.synteny_path}"
-    )
-    print(
-        f"Wrote {result.synteny_neighbor_result.rows} synteny neighbor-check rows -> "
-        f"{result.synteny_neighbors_path}"
-    )
-    print(
         f"Wrote {result.orthology_result.culled_projection_rows} pruned-projection rows -> "
         f"{result.culled_projections_path}"
     )
@@ -87,7 +76,7 @@ def _run(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     # Define the single-command workflow interface.
     parser = argparse.ArgumentParser(
-        prog="tunic",
+        prog="stola",
         description=(
             "Lift reference CNEEs through a chain file, classify their query "
             "orthology, and write summary tables and figures."
@@ -120,30 +109,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--synteny-flank-sizes",
-        type=int,
-        nargs="+",
-        default=list(DEFAULT_FLANK_SIZES),
-        help=(
-            "One or more reference flank sizes (bases upstream/downstream) for "
-            "flanking-synteny verification; the output TSV gets one row per "
-            f"candidate per size [default: {list(DEFAULT_FLANK_SIZES)}]"
-        ),
-    )
-    parser.add_argument(
-        "--synteny-max-one2one-controls",
-        type=int,
-        default=50000,
-        help="Maximum one2one positive-control projections in synteny output [default: 50000]",
-    )
-    parser.add_argument(
         "--min-sequence-identity",
         type=float,
         default=0.7,
         help=(
-            "Minimum sequence identity for a 'solid' candidate in the synteny "
-            "diagnostic reports and the overlap-stats summary (does not gate "
-            "orthology categorization) [default: 0.7]"
+            "Minimum sequence identity for a 'solid' candidate in the "
+            "overlap-stats summary (does not gate orthology categorization) "
+            "[default: 0.7]"
         ),
     )
     parser.add_argument(
@@ -151,9 +123,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.1,
         help=(
-            "Maximum gap fraction for a 'solid' candidate in the synteny "
-            "diagnostic reports and the overlap-stats summary (does not gate "
-            "orthology categorization) [default: 0.1]"
+            "Maximum gap fraction for a 'solid' candidate in the overlap-stats "
+            "summary (does not gate orthology categorization) [default: 0.1]"
         ),
     )
     parser.add_argument(

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 from .models import ChainBlock, ChainRecord
 
@@ -133,3 +136,46 @@ def iter_chain_blocks(chain_text: str) -> list[ChainBlock]:
             )
         )
     return blocks
+
+
+@dataclass(frozen=True)
+class BlockIndex:
+    blocks: list[ChainBlock]
+    ref_ends: list[int]
+    ref_starts: list[int]
+
+    @classmethod
+    def from_blocks(cls, blocks: list[ChainBlock]) -> "BlockIndex":
+        # Sort blocks and cache reference starts/ends for overlap and nearest-
+        # block queries.
+        ordered = sorted(blocks, key=lambda block: (block.ref_start, block.ref_end))
+        return cls(
+            ordered,
+            [block.ref_end for block in ordered],
+            [block.ref_start for block in ordered],
+        )
+
+    def overlapping(self, start: int, end: int) -> Iterator[ChainBlock]:
+        # Yield blocks overlapping a half-open reference interval.
+        index = bisect_right(self.ref_ends, start)
+        while index < len(self.blocks):
+            block = self.blocks[index]
+            if block.ref_start >= end:
+                break
+            yield block
+            index += 1
+
+
+def _flanking_blocks(
+    blocks: BlockIndex, start: int, end: int
+) -> tuple[ChainBlock | None, ChainBlock | None]:
+    # Find the aligned blocks immediately preceding/following a reference
+    # interval that itself overlaps no aligned block -- i.e. a "lost"
+    # candidate sitting fully inside a chain gap.
+    preceding_index = bisect_right(blocks.ref_ends, start) - 1
+    following_index = bisect_left(blocks.ref_starts, end)
+    preceding = blocks.blocks[preceding_index] if preceding_index >= 0 else None
+    following = (
+        blocks.blocks[following_index] if following_index < len(blocks.blocks) else None
+    )
+    return preceding, following

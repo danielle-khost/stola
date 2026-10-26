@@ -1,10 +1,10 @@
-# tunic
+# stola
 Development repo for toga-like annotations of CNEEs
 
 ## Installation
 
 ### Conda (recommended)
-tunic is packaged for conda (a bioconda release is planned). Until then, build the package from a checkout and install it into its own environment:
+stola is packaged for conda (a bioconda release is planned). Until then, build the package from a checkout and install it into its own environment:
 
 ```
 git clone https://github.com/danielle-khost/toga4cnee.git
@@ -13,11 +13,11 @@ cd toga4cnee
 conda create -n conda-build -c conda-forge conda-build
 conda run -n conda-build conda build recipe -c conda-forge -c bioconda --output-folder dist/conda
 
-conda create -n tunic -c ./dist/conda -c conda-forge -c bioconda tunic
-conda activate tunic
+conda create -n stola -c ./dist/conda -c conda-forge -c bioconda stola
+conda activate stola
 ```
 
-This installs the `tunic` pipeline and the `tunic-compare-cross-orthology` utility, with all of their dependencies.
+This installs the `stola` pipeline and the `stola-compare-cross-orthology` utility, with all of their dependencies.
 
 ### pip
 For development, install from a checkout with `pip` instead:
@@ -32,7 +32,7 @@ pip install ".[cluster]"   # plus the dependencies of compare-cross-orthology's 
 Run the first workflow pass with one command:
 
 ```bash
-tunic alignment.chain.gz reference_cnees.bed reference.fa/2bit query.fa/2bit \
+stola alignment.chain.gz reference_cnees.bed reference.fa/2bit query.fa/2bit \
   --outdir [path] --query-prefix [string]
 ```
 
@@ -105,7 +105,7 @@ Projections of ref CNEEs with more than one candidate (one2many, many2one, compl
 
 ## Analysis
 ### Utility scripts
-`tunic-compare-cross-orthology` (installed with the package): collects orthology info across multiple runs of the same reference against different queries. Organized into run modes (see `--help` on each subcommand):
+`stola-compare-cross-orthology` (installed with the package): collects orthology info across multiple runs of the same reference against different queries. Organized into run modes (see `--help` on each subcommand):
 - `summary`: build the combined per-species orthology-category TSV
 - `sequence`: extract FASTA sequence of shared one2one orthologs
 - `cluster`: compute the D statistic of phylogenetic signal (Fritz & Purvis 2010) for CNEE loss on a tree
@@ -124,7 +124,7 @@ out/ref_vs_queryC  path/to/queryC.fasta|2bit sppC
 #### summary
 Useage:
 ```
-tunic-compare-cross-orthology summary \\
+stola-compare-cross-orthology summary \\
     --query-dirs run_dirs.txt \\
     --ref-bed reference_cnees.bed \\
     --ref-prefix ref \\
@@ -136,7 +136,7 @@ tunic-compare-cross-orthology summary \\
 #### sequence
 Useage:
 ```
-tunic-compare-cross-orthology sequence \\
+stola-compare-cross-orthology sequence \\
     --query-dirs run_dirs.txt \\
     --orthology-table ref_combined_orthology.tsv \\
     --ref-bed reference_cnees.bed \\
@@ -155,7 +155,7 @@ By default the script outputs only CNEEs >40bp (`--min-length`) and a maximum of
 #### cluster
 Useage:
 ```
-tunic-compare-cross-orthology cluster \\
+stola-compare-cross-orthology cluster \\
     --orthology-table ref_combined_orthology.tsv \\
     --tree species.nwk \\
     --ref-prefix dummyRef \\
@@ -181,7 +181,7 @@ orthology category counts and category-grouped sequence identity/gap fraction
 densities:
 
 ```bash
-python tests/plot_tunic_outputs.py \
+python tests/plot_stola_outputs.py \
   --summary overlap_stats.summary.tsv \
   --stats overlap_stats.tsv \
   --orthology query_ortho_status.tsv \

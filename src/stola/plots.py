@@ -1,4 +1,4 @@
-"""Dependency-free SVG QC plots for TUNIC outputs."""
+"""Dependency-free SVG QC plots for STOLA outputs."""
 
 from __future__ import annotations
 

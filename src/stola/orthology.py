@@ -11,7 +11,7 @@ from typing import Iterator
 
 from .assembly_gaps import DEFAULT_MIN_GAP_LENGTH, NRunIndex, scan_query_assembly_gaps
 from .bed import parse_bed
-from .chain import iter_chain_blocks
+from .chain import BlockIndex, _flanking_blocks, iter_chain_blocks
 from .index import load_index
 from .models import ChainRecord
 from .sequence_compare import SequenceComparator
@@ -26,7 +26,6 @@ from .spurious_filter import (
     decide_locus,
     score_locus,
 )
-from .synteny import BlockIndex, _flanking_blocks
 
 ORTHOLOGY_COLUMNS = [
     "query_cnee_id",

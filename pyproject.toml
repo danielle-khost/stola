@@ -3,14 +3,14 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tunic"
+name = "stola"
 dynamic = ["version"]
 description = "TOGA-like projection workflow components for conserved nonexonic elements"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-authors = [{ name = "TUNIC developers" }]
+authors = [{ name = "STOLA developers" }]
 dependencies = ["biopython>=1.80", "networkx>=3.0", "numpy>=1.24"]
 
 [project.optional-dependencies]
@@ -22,11 +22,11 @@ cluster = ["matplotlib>=3.7", "pandas", "toytree>=3.0"]
 Homepage = "https://github.com/danielle-khost/toga4cnee"
 
 [project.scripts]
-tunic = "tunic.cli:main"
-tunic-compare-cross-orthology = "tunic.cross_orthology:main"
+stola = "stola.cli:main"
+stola-compare-cross-orthology = "stola.cross_orthology:main"
 
 [tool.setuptools.dynamic]
-version = { attr = "tunic.__version__" }
+version = { attr = "stola.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

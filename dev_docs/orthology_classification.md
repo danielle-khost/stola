@@ -11,8 +11,8 @@ filtering can happen post-hoc if desired.
 Anything with more than one candidate projection -- one2many, many2one, or
 complex/many2many by initial graph shape -- goes through relative-score
 filtering ("Modified relative scoring algo" in `spurious_hit_filtering.md`;
-`tunic.spurious_filter`, wired into
-`tunic.orthology.classify_orthology` as `filter_multi_projections`).
+`stola.spurious_filter`, wired into
+`stola.orthology.classify_orthology` as `filter_multi_projections`).
 It works per query locus (the merged query span of the eligible
 projections landing there), scoring every chain aligned at that locus once:
 - Soft depth filter: of the chains overlapping the locus, only the top 20

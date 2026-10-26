@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from tunic.plots import _svg_header  # noqa: E402
+from stola.plots import _svg_header  # noqa: E402
 
 
 @dataclass(frozen=True)

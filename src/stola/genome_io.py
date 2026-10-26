@@ -212,7 +212,7 @@ class FastaAccessor:
                         f"{self.fasta_path}: sequence {current_id!r} has ragged "
                         f"line wrapping -- line {previous_line_number} has "
                         f"{previous_line_bases} bases, but the record's other "
-                        f"lines have {current_line_bases}. tunic requires "
+                        f"lines have {current_line_bases}. stola requires "
                         "every line of a FASTA record except the last to be the "
                         "same length. Re-wrap this file to a uniform width (e.g. "
                         "`seqkit seq -w 60 in.fa > out.fa`) and rerun."
