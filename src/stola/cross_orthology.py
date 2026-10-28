@@ -1,8 +1,7 @@
 """Compare per-reference-CNEE orthology status across multiple pipeline runs.
 
 Takes a list of `stola` output directories -- the same reference BED
-lifted to different query species -- and offers three run modes (see
-dev_docs/compare_cross_orthology.md):
+lifted to different query species -- and offers three run modes:
 
     summary: build one combined TSV where each row is a reference CNEE and
         each column is a query species' final orthology_category for that
@@ -31,15 +30,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bed import parse_bed
-from .genome_io import open_genome_accessor
-from .orthology import ORTHOLOGY_COLUMNS, REF_CNEE_COLUMNS
-from .plots import _bar_svg
+from .cli import bounded, existing_file
+from .genome_io import open_genome_accessor, reverse_complement
+from .orthology import ORTHOLOGY_COLUMNS, REF_CNEE_COLUMNS, query_id_prefix_from_one2one
+from .plots import bar_svg
 from .workflow import (
     QUERY_BED_FILENAME,
     QUERY_ORTHOLOGY_FILENAME,
     REF_ORTHOLOGY_FILENAME,
     WORK_DIRNAME,
 )
+
+# query_ortho_status.tsv's partner_ref_cnees lists every ref in a many2one/
+# complex group, which can exceed csv's default 131,072-character field limit
+# for very large groups. 2**31 - 1 is the largest limit every platform accepts.
+csv.field_size_limit(2**31 - 1)
 
 GENERIC_LABEL = "q"  # DEFAULT_QUERY_ID_PREFIX ("q_") stripped of its trailing "_".
 FASTA_SUBDIR_NAME = "one2one_ortholog_fasta"
@@ -102,12 +107,12 @@ def _read_run_dirs(list_path: str | Path) -> list[tuple[Path, Path | None, str |
 def _read_query_orthology_file(
     query_orthology_path: Path, build_one2one_map: bool
 ) -> tuple[str | None, dict[str, str]]:
-    # "Peek" at the first real (non-"NA") query_cnee_id to recover the
-    # --query-prefix used for this run. When build_one2one_map is set (FASTA
-    # extraction is on), also collect every one2one ref->query id pair in
-    # the same pass, rather than re-reading this file a second time.
+    # "Peek" at the first one2one row to recover the whole --query-prefix
+    # used for this run (underscores included), minus its trailing "_". When
+    # build_one2one_map is set (FASTA extraction is on), also collect every
+    # one2one ref->query id pair in the same pass, rather than re-reading
+    # this file a second time.
     peeked_label: str | None = None
-    seen_first_non_na = False
     one2one_map: dict[str, str] = {}
     with query_orthology_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -118,16 +123,23 @@ def _read_query_orthology_file(
             )
         for row in reader:
             query_cnee_id = row["query_cnee_id"]
-            has_query_id = bool(query_cnee_id) and query_cnee_id != "NA"
-            if not seen_first_non_na and has_query_id:
-                peeked_label = query_cnee_id.split("_", 1)[0]
-                seen_first_non_na = True
-                if not build_one2one_map:
-                    break
-            if build_one2one_map and has_query_id and row["orthology_category"] == "one2one":
-                ref_id = row["partner_ref_cnees"]
-                if ref_id and "," not in ref_id:
-                    one2one_map[ref_id] = query_cnee_id
+            ref_id = row["partner_ref_cnees"]
+            if (
+                row["orthology_category"] != "one2one"
+                or not query_cnee_id
+                or query_cnee_id == "NA"
+                or not ref_id
+                or "," in ref_id
+            ):
+                continue
+            if peeked_label is None:
+                prefix = query_id_prefix_from_one2one(query_cnee_id, ref_id)
+                if prefix is not None:
+                    peeked_label = prefix.removesuffix("_")
+                    if not build_one2one_map:
+                        break
+            if build_one2one_map:
+                one2one_map[ref_id] = query_cnee_id
     return peeked_label, one2one_map
 
 
@@ -313,16 +325,15 @@ def _compute_frequency_distributions(
 def write_frequency_distribution_plots(
     ref_ids: list[str], columns: list[RunColumn], ref_prefix: str, out_dir: Path
 ) -> tuple[Path, Path]:
-    # Per dev_docs/compare_cross_orthology.md's "Summary figures": how many
-    # ref CNEEs were lost in exactly 0, 1, 2, ... of the samples, and same
-    # for multi-projection -- one bar chart each.
+    # How many ref CNEEs were lost in exactly 0, 1, 2, ... of the samples,
+    # and same for multi-projection -- one bar chart each.
     n_columns = len(columns)
     labels = [str(i) for i in range(n_columns + 1)]
     loss_counts, multi_counts = _compute_frequency_distributions(ref_ids, columns)
 
     loss_path = Path(out_dir) / f"{ref_prefix}.loss_frequency_distribution.svg"
     loss_path.write_text(
-        _bar_svg(
+        bar_svg(
             title="CNEE loss frequency across samples",
             subtitle=f"Reference CNEEs: {len(ref_ids):,}; samples: {n_columns}",
             x_label="Number of samples lost in",
@@ -335,7 +346,7 @@ def write_frequency_distribution_plots(
 
     multi_path = Path(out_dir) / f"{ref_prefix}.multiproj_frequency_distribution.svg"
     multi_path.write_text(
-        _bar_svg(
+        bar_svg(
             title="CNEE multi-projection frequency across samples",
             subtitle=f"Reference CNEEs: {len(ref_ids):,}; samples: {n_columns}",
             x_label="Number of samples multi-projection in",
@@ -437,8 +448,6 @@ def extract_one2one_orthologs(
         file=sys.stderr,
     )
 
-    from Bio.Seq import Seq
-
     # Pass 1: fetch every reference sequence up front (one genome, opened
     # and closed before any query genome is touched), seeding one record
     # list per surviving ref CNEE.
@@ -519,7 +528,7 @@ def extract_one2one_orthologs(
                     records_by_ref.pop(ref_id, None)
                     continue
                 if strand == "-":
-                    seq = str(Seq(seq).reverse_complement())
+                    seq = reverse_complement(seq)
                 records_by_ref[ref_id].append(
                     (f"{col.label} {query_id} {chrom}:{start}-{end}({strand})", seq.upper())
                 )
@@ -576,11 +585,6 @@ def _run_summary_mode(args: argparse.Namespace) -> None:
 
 
 def _run_sequence_mode(args: argparse.Namespace) -> None:
-    if not 0.0 <= args.max_lost_frac <= 1.0:
-        raise SystemExit(f"--max-lost-frac must be between 0 and 1 (got {args.max_lost_frac})")
-    if not 0.0 <= args.max_multi_frac <= 1.0:
-        raise SystemExit(f"--max-multi-frac must be between 0 and 1 (got {args.max_multi_frac})")
-
     run_dirs = _read_run_dirs(args.query_dirs)
     if not run_dirs:
         raise SystemExit(f"{args.query_dirs} lists no output directories")
@@ -843,9 +847,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build the combined per-species orthology-category TSV",
         description="Build one combined TSV of per-reference-CNEE orthology category across samples.",
     )
-    summary_parser.add_argument("--query-dirs", required=True, type=Path, help=query_dirs_help)
+    summary_parser.add_argument("--query-dirs", required=True, type=existing_file, help=query_dirs_help)
     summary_parser.add_argument(
-        "--ref-bed", required=True, type=Path, help="Reference CNEE BED3+ file used for every run"
+        "--ref-bed", required=True, type=existing_file, help="Reference CNEE BED3+ file used for every run"
     )
     summary_parser.add_argument("--ref-prefix", required=True, help=ref_prefix_help)
     summary_parser.add_argument("--out-dir", type=Path, default=Path("."), help=out_dir_help)
@@ -856,11 +860,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extract FASTA sequence for shared one2one orthologs",
         description="Extract one <ref_cnee_id>_orthologs.fasta per ref CNEE that's one2one in enough samples.",
     )
-    sequence_parser.add_argument("--query-dirs", required=True, type=Path, help=query_dirs_help)
+    sequence_parser.add_argument("--query-dirs", required=True, type=existing_file, help=query_dirs_help)
     sequence_parser.add_argument(
         "--orthology-table",
         required=True,
-        type=Path,
+        type=existing_file,
         help=(
             "The '<ref-prefix>_combined_orthology.tsv' built by `summary` mode -- must come "
             "from the same --query-dirs sample sheet (same run dirs/labels), since categories "
@@ -868,16 +872,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sequence_parser.add_argument(
-        "--ref-bed", required=True, type=Path, help="Reference CNEE BED3+ file used for every run"
+        "--ref-bed", required=True, type=existing_file, help="Reference CNEE BED3+ file used for every run"
     )
     sequence_parser.add_argument(
-        "--ref-genome", required=True, type=Path, help="Reference genome (FASTA/2bit)"
+        "--ref-genome", required=True, type=existing_file, help="Reference genome (FASTA/2bit)"
     )
     sequence_parser.add_argument("--ref-prefix", required=True, help=ref_prefix_help)
     sequence_parser.add_argument("--out-dir", type=Path, default=Path("."), help=out_dir_help)
     sequence_parser.add_argument(
         "--min-length",
-        type=int,
+        type=bounded(int, minimum=0),
         default=40,
         help=(
             "Minimum reference CNEE length (bp) to include in FASTA extraction, "
@@ -887,7 +891,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sequence_parser.add_argument(
         "--max-seqs",
-        type=int,
+        type=bounded(int, minimum=0),
         default=300000,
         help=(
             "Maximum number of one2one ortholog FASTA files to write; 0 disables this cap "
@@ -896,7 +900,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sequence_parser.add_argument(
         "--max-lost-frac",
-        type=float,
+        type=bounded(float, minimum=0, maximum=1),
         default=0.3,
         help=(
             "Maximum fraction of samples a ref CNEE can be lost in (a reference-only "
@@ -906,7 +910,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sequence_parser.add_argument(
         "--max-multi-frac",
-        type=float,
+        type=bounded(float, minimum=0, maximum=1),
         default=0.1,
         help=(
             "Maximum fraction of samples a ref CNEE can be multi-projection in "
@@ -927,13 +931,13 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_parser.add_argument(
         "--orthology-table",
         required=True,
-        type=Path,
+        type=existing_file,
         help="The '<ref-prefix>_combined_orthology.tsv' built by `summary` mode",
     )
     cluster_parser.add_argument(
         "--tree",
         required=True,
-        type=Path,
+        type=existing_file,
         help=(
             "Phylogenetic tree of species in Newick format; tip labels must exactly match "
             "the species labels used as columns in --orthology-table"
@@ -943,7 +947,7 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_parser.add_argument("--out-dir", type=Path, default=Path("."), help=out_dir_help)
     cluster_parser.add_argument(
         "--min-lost",
-        type=int,
+        type=bounded(int, minimum=1),
         default=3,
         help=(
             "Only compute D for a ref CNEE lost in at least this many species (it's always "
@@ -953,7 +957,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cluster_parser.add_argument(
         "--n-perms",
-        type=int,
+        type=bounded(int, minimum=1),
         default=10,
         help=(
             "Number of permutations/simulations per distinct lost-species-count group for each "

@@ -316,6 +316,12 @@ def main(argv: list[str] | None = None) -> None:
     matplotlib.use("Agg")
 
     run_dir = args.run_dir
+    index_path = run_dir / "work" / "chain_index.json"
+    if not index_path.exists():
+        sys.exit(
+            f"{index_path} not found: stola deletes its chain index after a run "
+            "unless given --keep-intermediates, so re-run it with that flag"
+        )
     out_dir = args.out_dir or run_dir / "chain_pileups"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -349,12 +355,15 @@ def main(argv: list[str] | None = None) -> None:
             for pool in pools.values():
                 if pool and len(selected) < args.random:
                     selected.append(pool.pop())
+        if not selected:
+            sys.exit("No multi-projection loci to plot")
 
     print("Loading chain index ...", flush=True)
-    payload, records = load_index(run_dir / "work" / "chain_index.json")
+    chain_index = load_index(index_path)
+    records = chain_index.records
     records_by_id = {r.chain_id: r for r in records}
     envelopes = build_query_envelopes(records)
-    cache = ChainEnvelopeCache(payload["indexed_chain_path"], records_by_id)
+    cache = ChainEnvelopeCache(chain_index.indexed_chain_path, records_by_id)
     comparator = SequenceComparator(args.ref_genome, args.query_genome, run_dir / "work")
     rows = []
     try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -65,8 +66,18 @@ def scan_chain_file(chain_path: str | Path) -> list[ChainRecord]:
     return records
 
 
-def build_index(chain_file: str | Path, out_path: str | Path) -> dict[str, Any]:
-    # Build the transparent JSON chain index consumed by later workflow stages.
+@dataclass(frozen=True)
+class ChainIndex:
+    """A loaded chain index: the plain chain file that the byte offsets point
+    into, plus one record (header fields and byte span) per chain."""
+
+    indexed_chain_path: Path
+    records: list[ChainRecord]
+
+
+def build_index(chain_file: str | Path, out_path: str | Path) -> ChainIndex:
+    # Build the transparent JSON chain index consumed by later workflow
+    # stages, and return it already loaded so it needn't be read back.
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     indexed_chain_path = _ensure_plain_chain(chain_file, out)
@@ -81,11 +92,11 @@ def build_index(chain_file: str | Path, out_path: str | Path) -> dict[str, Any]:
     with out.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
         handle.write("\n")
-    return payload
+    return ChainIndex(indexed_chain_path, records)
 
 
-def load_index(index_path: str | Path) -> tuple[dict[str, Any], list[ChainRecord]]:
-    # Load and validate a chain index, returning metadata plus typed records.
+def load_index(index_path: str | Path) -> ChainIndex:
+    # Load and validate a chain index written by build_index.
     with Path(index_path).open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if int(payload.get("format_version", -1)) != FORMAT_VERSION:
@@ -93,4 +104,11 @@ def load_index(index_path: str | Path) -> tuple[dict[str, Any], list[ChainRecord
             f"Unsupported index format version: {payload.get('format_version')}"
         )
     records = [ChainRecord.from_dict(item) for item in payload["records"]]
-    return payload, records
+    return ChainIndex(Path(payload["indexed_chain_path"]), records)
+
+
+def as_chain_index(chain_index: ChainIndex | str | Path) -> ChainIndex:
+    # Accept an already-loaded index, or the path to an index file to load.
+    if isinstance(chain_index, ChainIndex):
+        return chain_index
+    return load_index(chain_index)

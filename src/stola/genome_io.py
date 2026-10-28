@@ -17,12 +17,26 @@ query (or vice versa) just works.
 
 from __future__ import annotations
 
+import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from Bio.SeqIO.TwoBitIO import TwoBitIterator
+
 TWOBIT_SIGNATURE = 0x1A412743
+
+# IUPAC DNA complement (same mapping as Biopython's Seq.reverse_complement).
+_DNA_COMPLEMENT = str.maketrans(
+    "ACGTUMRWSYKVHDBNXacgtumrwsykvhdbnx",
+    "TGCAAKYWSRMBDHVNXtgcaakywsrmbdhvnx",
+)
+
+
+def reverse_complement(seq: str) -> str:
+    """Reverse-complement a DNA string, keeping IUPAC codes and case."""
+    return seq.translate(_DNA_COMPLEMENT)[::-1]
 
 
 def sniff_genome_format(path: str | Path) -> str:
@@ -114,8 +128,8 @@ def check_twobit_complete(path: str | Path) -> None:
         )
 
 
-def _strip_version(seq_id: str) -> str:
-    # Remove a terminal numeric accession version from a sequence ID.
+def strip_accession_version(seq_id: str) -> str:
+    """Remove a terminal numeric accession version, e.g. "NC_052532.1" -> "NC_052532"."""
     prefix, dot, suffix = seq_id.rpartition(".")
     if dot and suffix.isdigit():
         return prefix
@@ -127,7 +141,7 @@ def _build_aliases(keys: Iterable[str]) -> dict[str, str]:
     exact = {key: key for key in keys}
     stripped: dict[str, list[str]] = {}
     for key in exact:
-        stripped.setdefault(_strip_version(key), []).append(key)
+        stripped.setdefault(strip_accession_version(key), []).append(key)
     aliases = dict(exact)
     for key, values in stripped.items():
         if key in aliases or len(values) != 1:
@@ -149,18 +163,36 @@ class FastaAccessor:
     """Random-access FASTA reader with conservative accession-version aliases."""
 
     def __init__(self, fasta_path: str | Path, index_path: str | Path) -> None:
-        # Open the FASTA and make sure a reusable byte-offset index is available.
+        # Open the FASTA and make sure a byte-offset index built from this
+        # exact file is available, (re)building it if not.
         self.fasta_path = Path(fasta_path)
         self.index_path = Path(index_path)
-        if not self.index_path.exists():
+        if not self._index_is_current():
             self._build_index()
         self.records = self._read_index()
         self.aliases = _build_aliases(self.records.keys())
         self.handle = self.fasta_path.open("rb")
 
+    def _source_line(self) -> str:
+        # Identifies the FASTA an index was built from. Byte offsets are only
+        # valid for that exact file, so a different, edited or re-wrapped
+        # FASTA (different size or modification time) needs a new index.
+        stat = self.fasta_path.stat()
+        return f"#source\tsize={stat.st_size}\tmtime_ns={stat.st_mtime_ns}\n"
+
+    def _index_is_current(self) -> bool:
+        # An existing index is reused only if its #source line matches the
+        # FASTA as it is now; an index without one (from an older stola
+        # version) is rebuilt too.
+        if not self.index_path.exists():
+            return False
+        with self.index_path.open("r", encoding="utf-8") as handle:
+            return handle.readline() == self._source_line()
+
     def _build_index(self) -> None:
         # Scan the FASTA once and save per-record byte layout metadata.
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        source_line = self._source_line()
         rows: list[FastaRecordIndex] = []
         current_id: str | None = None
         current_length = 0
@@ -236,13 +268,18 @@ class FastaAccessor:
                 )
             )
 
-        with self.index_path.open("w", encoding="utf-8") as out:
+        # Written under a temporary name and renamed into place, so an
+        # interrupted run never leaves a partial index that looks current.
+        tmp_path = self.index_path.with_name(f"{self.index_path.name}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as out:
+            out.write(source_line)
             out.write("#seq_id\tlength\toffset\tline_bases\tline_width\n")
             for row in rows:
                 out.write(
                     f"{row.seq_id}\t{row.length}\t{row.offset}\t"
                     f"{row.line_bases}\t{row.line_width}\n"
                 )
+        os.replace(tmp_path, self.index_path)
 
     def _read_index(self) -> dict[str, FastaRecordIndex]:
         # Load saved FASTA byte-offset metadata into typed records.
@@ -314,14 +351,6 @@ class TwoBitAccessor:
     """
 
     def __init__(self, twobit_path: str | Path) -> None:
-        try:
-            from Bio.SeqIO.TwoBitIO import TwoBitIterator
-        except ImportError as exc:
-            raise RuntimeError(
-                "Biopython is required to read .2bit genome files. "
-                "Activate the biopython conda environment or install biopython."
-            ) from exc
-
         self.twobit_path = Path(twobit_path)
         check_twobit_complete(self.twobit_path)
         self._iterator = TwoBitIterator(str(self.twobit_path))
@@ -399,14 +428,6 @@ def _iter_fasta_sequences(path: str | Path) -> Iterator[tuple[str, str]]:
 
 
 def _iter_twobit_sequences(path: str | Path) -> Iterator[tuple[str, str]]:
-    try:
-        from Bio.SeqIO.TwoBitIO import TwoBitIterator
-    except ImportError as exc:
-        raise RuntimeError(
-            "Biopython is required to read .2bit genome files. "
-            "Activate the biopython conda environment or install biopython."
-        ) from exc
-
     check_twobit_complete(path)
     iterator = TwoBitIterator(str(path))
     try:

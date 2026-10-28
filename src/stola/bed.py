@@ -14,7 +14,7 @@ def parse_bed(path: str | Path) -> list[BedInterval]:
 
     Column 4 is used as the display CNEE ID when present. Otherwise, a stable
     coordinate-based ID is synthesized. The cnee_uid is unique within the file;
-    downstream orthology/summary/synteny logic key on cnee_uid specifically so
+    downstream orthology/summary logic keys on cnee_uid specifically so
     that two intervals sharing the same display cnee_id are never conflated
     into one reference locus.
     """

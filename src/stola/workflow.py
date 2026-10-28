@@ -5,6 +5,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .bed import bed_missing_name_column, parse_bed, write_named_bed
 from .candidates import write_candidates
@@ -72,16 +73,24 @@ def run_workflow(
     query_fasta: str | Path,
     outdir: str | Path = ".",
     query_id_prefix: str = DEFAULT_QUERY_ID_PREFIX,
-    min_sequence_identity: float = 0.7,
-    max_fraction_gap: float = 0.1,
     filter_multi_projections: bool = True,
     soft_depth_limit: int = DEFAULT_SOFT_DEPTH_LIMIT,
     relative_score_threshold: float = DEFAULT_RELATIVE_SCORE_THRESHOLD,
     flank_window: int = DEFAULT_FLANK_WINDOW,
     flank_any_coverage_threshold: float = DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
     min_gap_length: int = DEFAULT_MIN_GAP_LENGTH,
+    keep_intermediates: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> WorkflowResult:
-    """Run the full chain/CNEE workflow, writing every output under outdir."""
+    """Run the full chain/CNEE workflow, writing every output under outdir.
+
+    Unless keep_intermediates is set, the large work/ intermediates (the chain
+    index, the decompressed chain copy and the candidate pairs) are deleted
+    once every output has been written; a failed run leaves them in place.
+
+    progress, if given, is called with a one-line message as each stage
+    starts or finishes, so a long run can report as it goes."""
+    report = progress or (lambda message: None)
     outdir_path = Path(outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
     work_dir = outdir_path / WORK_DIRNAME
@@ -112,21 +121,37 @@ def run_workflow(
             warnings.simplefilter("ignore")
             named_intervals = parse_bed(cnee_bed)
         write_named_bed(named_intervals, named_ref_bed_path)
+        report(
+            f"Reference BED had no name column; wrote generated CNEE ids -> {named_ref_bed_path}"
+        )
 
-    index_payload = build_index(chain_file, index_path)
-    candidate_count = write_candidates(index_path, cnee_bed, candidates_path)
+    # The chain index is built once and handed to each stage that needs it,
+    # rather than each stage re-reading work/chain_index.json.
+    chain_index = build_index(chain_file, index_path)
+    chain_count = len(chain_index.records)
+    indexed_chain_path = chain_index.indexed_chain_path
+    report(f"Indexed {chain_count} chains")
+    candidate_count = write_candidates(chain_index, cnee_bed, candidates_path)
+    report(f"Wrote {candidate_count} candidate chain/CNEE pairs -> {candidates_path}")
+    report("Computing overlap stats and sequence identity for each candidate ...")
     sequence_comparator = SequenceComparator(ref_fasta, query_fasta, work_dir)
     try:
         stats_count = write_overlap_stats(
-            index_path,
+            chain_index,
             candidates_path,
             out_stats,
             sequence_comparator=sequence_comparator,
         )
+        report(f"Wrote {stats_count} all overlap-stat rows -> {out_stats}")
+        report(
+            "Classifying orthology"
+            + (" and filtering multi-projections" if filter_multi_projections else "")
+            + " ..."
+        )
         orthology_result = classify_orthology(
             out_stats,
             cnee_bed,
-            index_path,
+            chain_index,
             out_orthology,
             out_bed,
             sequence_comparator=sequence_comparator,
@@ -141,14 +166,16 @@ def run_workflow(
             out_ref_cnees=out_ref_cnees,
             query_id_prefix=query_id_prefix,
         )
-        summary_count = summarize_overlap_stats(
-            out_stats,
-            out_summary,
-            cnee_bed=cnee_bed,
-            require_solid_reference=True,
-            min_sequence_identity=min_sequence_identity,
-            max_fraction_gap=max_fraction_gap,
+        del chain_index  # Not needed past orthology; free the records.
+        report(f"Wrote {orthology_result.query_bed_rows} query CNEE BED rows -> {out_bed}")
+        report(f"Wrote {orthology_result.orthology_rows} query orthology rows -> {out_orthology}")
+        report(
+            f"Wrote {orthology_result.culled_projection_rows} pruned-projection rows -> "
+            f"{out_culled_projections}"
         )
+        report(f"Wrote {orthology_result.ref_cnee_rows} ref orthology rows -> {out_ref_cnees}")
+        summary_count = summarize_overlap_stats(out_stats, out_summary, cnee_bed=cnee_bed)
+        report(f"Wrote {summary_count} all CNEE summary rows -> {out_summary}")
     finally:
         sequence_comparator.close()
     summary_plots = write_qc_plots(
@@ -158,10 +185,42 @@ def run_workflow(
         summary_dir / OVERLAP_DENSITY_FILENAME,
         summary_dir / SEQUENCE_IDENTITY_DENSITY_FILENAME,
     )
+    report(
+        f"Wrote alignment histogram for {summary_plots.histogram_n} CNEEs -> "
+        f"{summary_plots.histogram_path}"
+    )
+    report(
+        f"Wrote overlap density for {summary_plots.overlap_density_n} aligned candidate "
+        f"projections -> {summary_plots.overlap_density_path}"
+    )
+    report(
+        "Wrote sequence identity density for "
+        f"{summary_plots.sequence_identity_density_n} sequence-compared projections -> "
+        f"{summary_plots.sequence_identity_density_path}"
+    )
     orthology_summary = write_orthology_summary(out_ref_cnees, out_culled_projections, summary_dir)
+    report(
+        "Wrote final category counts, initial -> final reassignment, and rejection "
+        f"reason plots/tables -> {summary_dir}"
+    )
+
+    if not keep_intermediates:
+        # Nothing but scripts/plot_chain_pileup.py reads these after the run,
+        # and every run rebuilds them. The chain copy only exists for .gz
+        # input; a plain .chain input is indexed in place and is the user's
+        # own file, so it is never touched.
+        intermediates = [index_path, candidates_path]
+        if Path(chain_file).suffix == ".gz":
+            intermediates.append(indexed_chain_path)
+        for path in intermediates:
+            path.unlink(missing_ok=True)
+        report(
+            f"Removed intermediates {', '.join(path.name for path in intermediates)} "
+            f"from {work_dir}"
+        )
 
     return WorkflowResult(
-        chain_count=int(index_payload["chain_count"]),
+        chain_count=chain_count,
         candidate_count=candidate_count,
         stats_count=stats_count,
         query_bed_count=orthology_result.query_bed_rows,

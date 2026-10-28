@@ -7,8 +7,8 @@ package:
 
 source:
   # Local builds use this checkout. For bioconda-recipes, replace with the
-  # tagged GitHub release (see dev_docs/conda_packaging.md):
-  #   url: https://github.com/danielle-khost/toga4cnee/archive/refs/tags/v{{ version }}.tar.gz
+  # tagged GitHub release:
+  #   url: https://github.com/danielle-khost/stola/archive/refs/tags/v{{ version }}.tar.gz
   #   sha256: <sha256 of that tarball>
   path: ..
 
@@ -49,8 +49,8 @@ test:
     - pip
 
 about:
-  home: https://github.com/danielle-khost/toga4cnee
-  dev_url: https://github.com/danielle-khost/toga4cnee
+  home: https://github.com/danielle-khost/stola
+  dev_url: https://github.com/danielle-khost/stola
   summary: TOGA-like projection and orthology classification of conserved non-exonic elements (CNEEs) via whole-genome chain alignments
   license: MIT
   license_family: MIT

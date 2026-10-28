@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import math
+import time
 from pathlib import Path
+from typing import Callable
 
+from . import __version__
 from .orthology import (
     DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
     DEFAULT_FLANK_WINDOW,
@@ -16,8 +20,55 @@ from .orthology import (
 from .workflow import run_workflow
 
 
+def bounded(
+    kind: type,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    below_maximum: bool = False,
+) -> Callable[[str], float]:
+    """argparse type for a number parsed with kind (int or float) that must be
+    >= minimum and <= maximum (or < maximum, with below_maximum)."""
+
+    def parse(text: str):
+        try:
+            value = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"invalid {kind.__name__} value: {text!r}") from None
+        if not math.isfinite(value):
+            raise argparse.ArgumentTypeError(f"must be a finite number (got {text})")
+        too_low = minimum is not None and value < minimum
+        too_high = maximum is not None and (value >= maximum if below_maximum else value > maximum)
+        if too_low or too_high:
+            if maximum is None:
+                allowed = f">= {minimum}"
+            elif below_maximum:
+                allowed = f">= {minimum} and < {maximum}"
+            else:
+                allowed = f"between {minimum} and {maximum}"
+            raise argparse.ArgumentTypeError(f"must be {allowed} (got {text})")
+        return value
+
+    return parse
+
+
+def existing_file(text: str) -> Path:
+    """argparse type for an input file that must already exist."""
+    path = Path(text)
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"file not found: {text}")
+    return path
+
+
+def _print_progress(message: str) -> None:
+    # Timestamp each line and flush it at once, so progress shows up as it
+    # happens even when stdout is redirected to a log file.
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
 def _run(args: argparse.Namespace) -> None:
     # Launch the full one-command workflow; every output lands under args.outdir.
+    started = time.monotonic()
+    _print_progress(f"stola {__version__}: writing outputs under {args.outdir}")
     result = run_workflow(
         args.chain_file,
         args.cnee_bed,
@@ -25,52 +76,19 @@ def _run(args: argparse.Namespace) -> None:
         args.query_fasta,
         outdir=args.outdir,
         query_id_prefix=args.query_prefix,
-        min_sequence_identity=args.min_sequence_identity,
-        max_fraction_gap=args.max_fraction_gap,
         filter_multi_projections=not args.no_filter_multi_projections,
         soft_depth_limit=args.soft_depth_limit,
         relative_score_threshold=args.relative_score_threshold,
         flank_window=args.flank_window,
         flank_any_coverage_threshold=args.flank_any_coverage_threshold,
         min_gap_length=args.min_gap_length,
+        keep_intermediates=args.keep_intermediates,
+        progress=_print_progress,
     )
-    print(f"Indexed {result.chain_count} chains")
-    if result.named_ref_bed_path is not None:
-        print(
-            "Reference BED had no name column; wrote generated CNEE ids -> "
-            f"{result.named_ref_bed_path}"
-        )
-    print(f"Wrote {result.stats_count} all overlap-stat rows -> {result.stats_path}")
-    print(f"Wrote {result.query_bed_count} query CNEE BED rows -> {result.query_bed_path}")
-    print(
-        f"Wrote {result.orthology_result.orthology_rows} query orthology rows -> "
-        f"{result.orthology_path}"
+    minutes, seconds = divmod(round(time.monotonic() - started), 60)
+    _print_progress(
+        f"All outputs and intermediates written under {result.outdir} ({minutes}m {seconds:02d}s)"
     )
-    print(f"Wrote {result.summary_count} all CNEE summary rows -> {result.summary_path}")
-    plots = result.summary_plots
-    print(f"Wrote alignment histogram for {plots.histogram_n} CNEEs -> {plots.histogram_path}")
-    print(
-        f"Wrote overlap density for {plots.overlap_density_n} aligned candidate projections -> "
-        f"{plots.overlap_density_path}"
-    )
-    print(
-        "Wrote sequence identity density for "
-        f"{plots.sequence_identity_density_n} sequence-compared projections -> "
-        f"{plots.sequence_identity_density_path}"
-    )
-    print(
-        "Wrote final category counts, initial -> final reassignment, and rejection "
-        f"reason plots/tables -> {result.summary_dir}"
-    )
-    print(
-        f"Wrote {result.orthology_result.culled_projection_rows} pruned-projection rows -> "
-        f"{result.culled_projections_path}"
-    )
-    print(
-        f"Wrote {result.orthology_result.ref_cnee_rows} ref orthology rows -> "
-        f"{result.ref_cnees_path}"
-    )
-    print(f"All outputs and intermediates written under {result.outdir}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,10 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
             "orthology, and write summary tables and figures."
         ),
     )
-    parser.add_argument("chain_file", type=Path, help="Input .chain or .chain.gz file")
-    parser.add_argument("cnee_bed", type=Path, help="Reference CNEE BED3+ file")
-    parser.add_argument("ref_fasta", type=Path, help="Reference genome, FASTA or .2bit")
-    parser.add_argument("query_fasta", type=Path, help="Query genome, FASTA or .2bit")
+    parser.add_argument("chain_file", type=existing_file, help="Input .chain or .chain.gz file")
+    parser.add_argument("cnee_bed", type=existing_file, help="Reference CNEE BED3+ file")
+    parser.add_argument("ref_fasta", type=existing_file, help="Reference genome, FASTA or .2bit")
+    parser.add_argument("query_fasta", type=existing_file, help="Query genome, FASTA or .2bit")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "-o",
         "--outdir",
@@ -95,6 +114,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Directory for all outputs and intermediates (created if missing) "
             "[default: current directory]. See the README's Output section for "
             "the fixed filenames written underneath it."
+        ),
+    )
+    parser.add_argument(
+        "--keep-intermediates",
+        action="store_true",
+        help=(
+            "Keep the large intermediates under OUTDIR/work (the chain index, "
+            "the decompressed copy of a .gz chain file, and the candidate "
+            "chain/CNEE pairs) instead of deleting them after a successful "
+            "run. Only needed for scripts/plot_chain_pileup.py."
         ),
     )
     parser.add_argument(
@@ -109,30 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--min-sequence-identity",
-        type=float,
-        default=0.7,
-        help=(
-            "Minimum sequence identity for a 'solid' candidate in the "
-            "overlap-stats summary (does not gate orthology categorization) "
-            "[default: 0.7]"
-        ),
-    )
-    parser.add_argument(
-        "--max-fraction-gap",
-        type=float,
-        default=0.1,
-        help=(
-            "Maximum gap fraction for a 'solid' candidate in the overlap-stats "
-            "summary (does not gate orthology categorization) [default: 0.1]"
-        ),
-    )
-    parser.add_argument(
         "--no-filter-multi-projections",
         action="store_true",
         help=(
-            "Skip relative-score filtering of multi-projection orthology edges "
-            "(any edge in a one2many/many2one/complex component). A lone "
+            "Skip the projection filtering step for multi-projection orthology "
+            "edges (any edge in a one2many/many2one/complex component). A lone "
             "ref/query edge is never filtered either way. Categories are "
             "still assigned from the unfiltered graph, just without the "
             "extra quality gate."
@@ -140,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--soft-depth-limit",
-        type=int,
+        type=bounded(int, minimum=1),
         default=DEFAULT_SOFT_DEPTH_LIMIT,
         help=(
             "At each query locus, score only this many chains with aligned "
@@ -151,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--relative-score-threshold",
-        type=float,
+        type=bounded(float, minimum=0, maximum=1, below_maximum=True),
         default=DEFAULT_RELATIVE_SCORE_THRESHOLD,
         help=(
             "Keep a projection if its chain's local score (sequence identity "
@@ -162,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--flank-window",
-        type=int,
+        type=bounded(int, minimum=1),
         default=DEFAULT_FLANK_WINDOW,
         help=(
             "Query-side flank size (bases each side) included in each chain's "
@@ -171,20 +181,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--flank-any-coverage-threshold",
-        type=float,
+        type=bounded(float, minimum=0, maximum=1, below_maximum=True),
         default=DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD,
         help=(
-            "At a locus where only one chain aligns: minimum fraction of the "
-            "projection's flanks that must have aligned-block coverage from "
-            f"ANY chain to accept it [default: {DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD}]"
+            "At a locus where only one chain aligns: accept the projection if "
+            "the fraction of its flanks with aligned-block coverage from ANY "
+            f"chain is above this value [default: {DEFAULT_FLANK_ANY_COVERAGE_THRESHOLD}]"
         ),
     )
     parser.add_argument(
         "--min-gap-length",
-        type=int,
+        type=bounded(int, minimum=1),
         default=DEFAULT_MIN_GAP_LENGTH,
         help=(
-            "Minimum N-run length in the query FASTA considered a candidate "
+            "Minimum N-run length in the query genome considered a candidate "
             "deliberate assembly-gap marker, when inferring contig boundaries "
             f"for lost-ref sub-categorization [default: {DEFAULT_MIN_GAP_LENGTH}]"
         ),

@@ -1,5 +1,8 @@
+import contextlib
 import csv
 import gzip
+import io
+import random
 import struct
 import sys
 import tempfile
@@ -13,7 +16,7 @@ from stola.candidates import write_candidates
 from stola.index import build_index, load_index
 from stola.overlap import calculate_overlap_rows, write_overlap_stats
 from stola.sequence_compare import SequenceComparator
-from stola.summary import summarize_overlap_stats
+from stola.summary import SUMMARY_COLUMNS, summarize_overlap_stats
 from stola.workflow import run_workflow
 
 
@@ -207,10 +210,11 @@ class WorkflowTests(unittest.TestCase):
             chain, _ = _write_inputs(tmp_path)
             index = tmp_path / "index.json"
 
-            payload = build_index(chain, index)
-            _, records = load_index(index)
+            built = build_index(chain, index)
+            records = load_index(index).records
 
-        self.assertEqual(payload["chain_count"], 3)
+        self.assertEqual(built.records, records)
+        self.assertEqual(len(records), 3)
         self.assertEqual(records[0].chain_id, "1")
         self.assertEqual(records[0].start_byte, 0)
         self.assertGreater(records[1].start_byte, records[0].start_byte)
@@ -226,13 +230,14 @@ class WorkflowTests(unittest.TestCase):
                 handle.write(chain.read_bytes())
             index = tmp_path / "gz-index.json"
 
-            payload = build_index(gz_chain, index)
-            _, records = load_index(index)
+            build_index(gz_chain, index)
+            chain_index = load_index(index)
+            records = chain_index.records
 
-            self.assertEqual(payload["chain_count"], 3)
-            self.assertEqual(Path(payload["indexed_chain_path"]).name, "test.chain")
+            self.assertEqual(len(records), 3)
+            self.assertEqual(chain_index.indexed_chain_path.name, "test.chain")
             self.assertEqual(
-                Path(payload["indexed_chain_path"]).read_text(encoding="utf-8"),
+                chain_index.indexed_chain_path.read_text(encoding="utf-8"),
                 CHAIN_TEXT,
             )
             self.assertEqual(records[2].chain_id, "3")
@@ -357,7 +362,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(rows[0]["aligned_bases"], "120")
         self.assertEqual(rows[-1]["cnee_id"], "CNEE_GAPPED")
 
-    def test_summary_from_overlap_stats_uses_aligned_rows_by_default(self) -> None:
+    def test_summary_from_overlap_stats_lists_aligned_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             chain, bed = _write_inputs(tmp_path)
@@ -373,59 +378,240 @@ class WorkflowTests(unittest.TestCase):
             rows = _read_tsv(summary)
 
         self.assertEqual(count, 3)
+        self.assertEqual(list(rows[0]), SUMMARY_COLUMNS)
         self.assertEqual(rows[0]["cnee_uid"], "CNEE_PARTIAL")
-        self.assertEqual(rows[0]["projection_status"], "aligned")
         self.assertEqual(rows[0]["num_query_alignments"], "2")
-        self.assertEqual(rows[0]["overlap_fractions"], "1.0,0.5833333333333334")
+        self.assertEqual(rows[0]["overlap_fractions"], "1.000,0.583")
         self.assertEqual(rows[0]["gap_bases"], "0,50")
         self.assertEqual(rows[1]["cnee_uid"], "CNEE_GAPPED")
-        self.assertEqual(rows[1]["projection_status"], "lost")
         self.assertEqual(rows[1]["num_query_alignments"], "0")
         self.assertEqual(rows[1]["overlap_fractions"], "")
         self.assertEqual(rows[1]["gap_bases"], "")
         self.assertEqual(rows[2]["cnee_uid"], "CNEE_NO_CHAIN")
-        self.assertEqual(rows[2]["projection_status"], "missing")
         self.assertEqual(rows[2]["num_query_alignments"], "0")
 
-    def test_solid_aware_summary_marks_weak_only_refs_uncertain_loss(self) -> None:
+    def test_alignment_histogram_reads_summary_rows_past_csv_field_limit(self) -> None:
+        from stola.plots import write_alignment_histogram
+
+        n_alignments = 30_000  # ~180k chars per list, past csv's default 131,072
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            bed = tmp_path / "cnees.bed"
-            stats = tmp_path / "stats.tsv"
             summary = tmp_path / "summary.tsv"
-            bed.write_text(
-                "chr1\t0\t50\tCNEE_SOLID_PLUS_WEAK\n"
-                "chr1\t100\t150\tCNEE_WEAK_ONLY\n",
-                encoding="utf-8",
-            )
-            stats.write_text(
-                "cnee_uid\taligned_bases\tcovered_fraction\t"
-                "gap_bases_within_chain_span\tgap_fraction_within_chain_span\t"
-                "seq_identity\n"
-                "CNEE_SOLID_PLUS_WEAK\t50\t1.0\t0\t0.05\t0.8\n"
-                "CNEE_SOLID_PLUS_WEAK\t25\t0.5\t25\t0.5\t0.8\n"
-                "CNEE_WEAK_ONLY\t25\t0.5\t25\t0.5\t0.8\n",
+            values = ",".join(["0.583"] * n_alignments)
+            summary.write_text(
+                "\t".join(SUMMARY_COLUMNS) + "\n"
+                + f"CNEE_REPEAT\t{n_alignments}\t{values}\t{values}\t{values}\t{values}\n"
+                + "CNEE_SINGLE\t1\t1.000\t0\t0.950\t2\n",
                 encoding="utf-8",
             )
 
-            count = summarize_overlap_stats(
-                stats,
-                summary,
-                cnee_bed=bed,
-                require_solid_reference=True,
-                min_sequence_identity=0.7,
-                max_fraction_gap=0.1,
-            )
-            rows = {row["cnee_uid"]: row for row in _read_tsv(summary)}
+            total = write_alignment_histogram(summary, tmp_path / "hist.svg")
 
-        self.assertEqual(count, 2)
-        self.assertEqual(rows["CNEE_SOLID_PLUS_WEAK"]["projection_status"], "aligned")
-        self.assertEqual(rows["CNEE_SOLID_PLUS_WEAK"]["num_query_alignments"], "2")
-        self.assertEqual(rows["CNEE_SOLID_PLUS_WEAK"]["overlap_fractions"], "1.0,0.5")
-        self.assertEqual(rows["CNEE_WEAK_ONLY"]["projection_status"], "uncertain_loss")
-        self.assertEqual(rows["CNEE_WEAK_ONLY"]["num_query_alignments"], "1")
-        self.assertEqual(rows["CNEE_WEAK_ONLY"]["overlap_fractions"], "0.5")
-        self.assertEqual(rows["CNEE_WEAK_ONLY"]["gap_bases"], "25")
+        self.assertEqual(total, 2)
+
+    def test_cli_rejects_out_of_range_options(self) -> None:
+        from stola.cli import build_parser
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
+            inputs = [str(chain), str(bed), str(ref_fasta), str(query_fasta)]
+            parser = build_parser()
+
+            args = parser.parse_args(
+                inputs
+                + [
+                    "--soft-depth-limit", "1",
+                    "--relative-score-threshold", "0",
+                    "--flank-window", "1",
+                    "--flank-any-coverage-threshold", "0.99",
+                    "--min-gap-length", "1",
+                ]
+            )
+            self.assertEqual(args.soft_depth_limit, 1)
+            self.assertEqual(args.flank_any_coverage_threshold, 0.99)
+
+            bad_options = [
+                ["--soft-depth-limit", "0"],
+                ["--relative-score-threshold", "1"],
+                ["--relative-score-threshold", "-0.1"],
+                ["--relative-score-threshold", "nan"],
+                ["--flank-window", "0"],
+                ["--flank-any-coverage-threshold", "1.0"],
+                ["--min-gap-length", "0"],
+                ["--soft-depth-limit", "2.5"],
+            ]
+            for option in bad_options:
+                with self.subTest(option=option), contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit):
+                        parser.parse_args(inputs + option)
+                    self.assertIn(option[0], err.getvalue())
+
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit):
+                    parser.parse_args([str(tmp_path / "missing.chain")] + inputs[1:])
+            self.assertIn("file not found", err.getvalue())
+
+    def test_cli_reports_version(self) -> None:
+        from stola import __version__
+        from stola.cli import build_parser
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit):
+                build_parser().parse_args(["--version"])
+        self.assertEqual(out.getvalue().strip(), f"stola {__version__}")
+
+    def test_cli_passes_every_option_to_the_workflow(self) -> None:
+        from unittest import mock
+
+        from stola import cli
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
+            argv = [
+                str(chain), str(bed), str(ref_fasta), str(query_fasta),
+                "--outdir", str(tmp_path / "out"),
+                "--query-prefix", "aphWoo",
+                "--no-filter-multi-projections",
+                "--soft-depth-limit", "7",
+                "--relative-score-threshold", "0.3",
+                "--flank-window", "500",
+                "--flank-any-coverage-threshold", "0.25",
+                "--min-gap-length", "20",
+                "--keep-intermediates",
+            ]
+            with mock.patch.object(cli, "run_workflow") as run_workflow:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    cli.main(argv)
+
+        args, kwargs = run_workflow.call_args
+        self.assertEqual(args, (chain, bed, ref_fasta, query_fasta))
+        self.assertEqual(
+            kwargs,
+            {
+                "outdir": tmp_path / "out",
+                "query_id_prefix": "aphWoo",
+                "filter_multi_projections": False,
+                "soft_depth_limit": 7,
+                "relative_score_threshold": 0.3,
+                "flank_window": 500,
+                "flank_any_coverage_threshold": 0.25,
+                "min_gap_length": 20,
+                "keep_intermediates": True,
+                "progress": cli._print_progress,
+            },
+        )
+
+    def test_workflow_reports_each_stage_as_it_finishes(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
+            # Record, for each message, whether the stats file and the ref
+            # orthology table existed when it was reported.
+            stats_path = tmp_path / "overlap_stats.tsv"
+            ref_path = tmp_path / "ref_ortho_status.tsv"
+            messages: list[tuple[str, bool, bool]] = []
+            run_workflow(
+                chain,
+                bed,
+                ref_fasta,
+                query_fasta,
+                outdir=tmp_path,
+                progress=lambda message: messages.append(
+                    (message, stats_path.exists(), ref_path.exists())
+                ),
+            )
+
+        texts = [message for message, _, _ in messages]
+        self.assertTrue(texts[0].startswith("Indexed 3 chains"), texts)
+        self.assertEqual(
+            [text.split(" -> ")[0] for text in texts if text.startswith("Wrote")][:2],
+            ["Wrote 3 candidate chain/CNEE pairs", "Wrote 3 all overlap-stat rows"],
+        )
+        # Messages arrive between stages, not all at the end: the indexing
+        # message comes before overlap stats are written, and the overlap
+        # message before classification writes the ref orthology table.
+        self.assertEqual(messages[0][1:], (False, False))
+        overlap = next(m for m in messages if m[0].startswith("Wrote 3 all overlap-stat rows"))
+        self.assertEqual(overlap[1:], (True, False))
+        self.assertTrue(messages[-2][0].startswith("Wrote final category counts"))
+        self.assertTrue(messages[-1][0].startswith("Removed intermediates"))
+
+    def test_workflow_removes_intermediates_after_success(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+
+        for keep in (False, True):
+            with self.subTest(keep_intermediates=keep), tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                chain, bed = _write_inputs(tmp_path)
+                gz_chain = tmp_path / "test.chain.gz"
+                with gzip.open(gz_chain, "wb") as handle:
+                    handle.write(chain.read_bytes())
+                chain.unlink()
+                ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
+                outdir = tmp_path / "out"
+
+                result = run_workflow(
+                    gz_chain, bed, ref_fasta, query_fasta, outdir=outdir, keep_intermediates=keep
+                )
+
+                work_files = sorted(path.name for path in (outdir / "work").iterdir())
+                intermediates = ["candidate_chains.tsv", "chain_index.json", "test.chain"]
+                genome_indexes = ["query_fasta.idx", "ref_fasta.idx"]
+                expected = sorted(intermediates + genome_indexes) if keep else genome_indexes
+                self.assertEqual(work_files, expected)
+                self.assertTrue(gz_chain.exists())
+                # Outputs are unaffected.
+                self.assertEqual(len(_read_tsv(result.ref_cnees_path)), 3)
+                self.assertTrue(result.query_bed_path.exists())
+
+    def test_workflow_never_deletes_a_plain_chain_input(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            # The plain chain sits inside the run's own work/ folder, where a
+            # decompressed copy would go, and must still survive cleanup.
+            work_dir = tmp_path / "work"
+            work_dir.mkdir()
+            chain, bed = _write_inputs(tmp_path)
+            plain_chain = chain.rename(work_dir / chain.name)
+            ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
+
+            run_workflow(plain_chain, bed, ref_fasta, query_fasta, outdir=tmp_path)
+
+            self.assertEqual(plain_chain.read_text(encoding="utf-8"), CHAIN_TEXT)
+            self.assertFalse((work_dir / "chain_index.json").exists())
+            self.assertFalse((work_dir / "candidate_chains.tsv").exists())
+
+    def test_cli_prints_timestamped_progress(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+        from stola.cli import main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chain, bed = _write_inputs(tmp_path)
+            ref_fasta, query_fasta = _write_fasta_inputs(tmp_path)
+            outdir = tmp_path / "out"
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                main([str(chain), str(bed), str(ref_fasta), str(query_fasta), "--outdir", str(outdir)])
+
+        lines = out.getvalue().splitlines()
+        for line in lines:
+            self.assertRegex(line, r"^\[\d\d:\d\d:\d\d\] ")
+        self.assertIn("writing outputs under", lines[0])
+        self.assertIn("Indexed 3 chains", lines[1])
+        self.assertRegex(lines[-1], r"All outputs and intermediates written under .* \(\d+m \d\ds\)$")
 
     def test_cli_runs_workflow_from_bare_arguments(self) -> None:
         if not _has_networkx():
@@ -470,8 +656,7 @@ class WorkflowTests(unittest.TestCase):
             bed_lines = result.query_bed_path.read_text(encoding="utf-8").splitlines()
             summary_rows = _read_tsv(result.summary_path)
             orthology_rows = _read_tsv(result.orthology_path)
-            work_files = sorted(path.name for path in (tmp_path / "work").iterdir())
-            summary_figures = sorted(path.name for path in (tmp_path / "summary_figures").iterdir())
+            summary_figures =sorted(path.name for path in (tmp_path / "summary_figures").iterdir())
 
         self.assertEqual(result.summary_path, tmp_path / "summary_figures" / "overlap_stats.summary.tsv")
         self.assertEqual(
@@ -534,13 +719,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(na_categories["CNEE_PARTIAL"], "uncertain_loss")
         self.assertEqual(na_categories["CNEE_GAPPED"], "lost")
         self.assertEqual(na_categories["CNEE_NO_CHAIN"], "unaligned")
-        summary_statuses = {
-            row["cnee_uid"]: row["projection_status"] for row in summary_rows
+        summary_alignments = {
+            row["cnee_uid"]: row["num_query_alignments"] for row in summary_rows
         }
-        self.assertEqual(summary_statuses["CNEE_GAPPED"], "lost")
-        self.assertEqual(summary_statuses["CNEE_NO_CHAIN"], "missing")
-        # The synteny reports are no longer part of the pipeline.
-        self.assertFalse([name for name in work_files if "synteny" in name])
+        self.assertEqual(
+            summary_alignments, {"CNEE_PARTIAL": "2", "CNEE_GAPPED": "0", "CNEE_NO_CHAIN": "0"}
+        )
 
     def test_workflow_leaves_named_ref_bed_path_none_when_input_bed_has_names(self) -> None:
         if not _has_networkx():
@@ -552,8 +736,8 @@ class WorkflowTests(unittest.TestCase):
 
             result = run_workflow(chain, bed, ref_fasta, query_fasta, outdir=tmp_path)
 
-        self.assertIsNone(result.named_ref_bed_path)
-        self.assertEqual(list(tmp_path.glob("*_named.bed")), [])
+            self.assertIsNone(result.named_ref_bed_path)
+            self.assertEqual(list(tmp_path.glob("*_named.bed")), [])
 
     def test_workflow_writes_named_ref_bed_when_input_bed_lacks_name_column(self) -> None:
         if not _has_networkx():
@@ -579,21 +763,19 @@ class WorkflowTests(unittest.TestCase):
                 warnings.simplefilter("ignore")
                 result = run_workflow(chain, bed, ref_fasta, query_fasta, outdir=tmp_path)
 
-        self.assertEqual(result.named_ref_bed_path, tmp_path / "cnees_named.bed")
-        self.assertEqual(
-            result.named_ref_bed_path.read_text(encoding="utf-8").splitlines(),
-            [
-                "chr1\t120\t240\tcnee_000001_chr1_120_240",
-                "chr2\t175\t225\tcnee_000002_chr2_175_225",
-                "chr3\t10\t20\tcnee_000003_chr3_10_20",
-            ],
-        )
+            self.assertEqual(result.named_ref_bed_path, tmp_path / "cnees_named.bed")
+            self.assertEqual(
+                result.named_ref_bed_path.read_text(encoding="utf-8").splitlines(),
+                [
+                    "chr1\t120\t240\tcnee_000001_chr1_120_240",
+                    "chr2\t175\t225\tcnee_000002_chr2_175_225",
+                    "chr3\t10\t20\tcnee_000003_chr3_10_20",
+                ],
+            )
 
     def test_orthology_graph_edges_store_per_projection_metrics(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
-        import networkx as nx
-
         from stola.orthology import (
             _build_orthology_graph,
             _cluster_query_projections,
@@ -634,7 +816,7 @@ class WorkflowTests(unittest.TestCase):
 
             evidence = _read_projection_evidence(stats)
             clusters = _cluster_query_projections(evidence.projections)
-            graph = _build_orthology_graph(nx, ["CNEE_A", "CNEE_B"], clusters)
+            graph = _build_orthology_graph(["CNEE_A", "CNEE_B"], clusters)
 
         edge_a = graph.edges[_ref_node("CNEE_A"), "query:000001"]
         self.assertEqual(edge_a["projection_metrics"], [(0.9, 0.5), (0.3, 0.05)])
@@ -644,7 +826,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(edge_b["projection_metrics"], [(None, 0.25)])
         self.assertEqual(edge_b["projection_count"], 1)
 
-    def test_orthology_classification_uses_solid_edges_only(self) -> None:
+    def test_orthology_classification_reports_every_lone_edge_as_one2one(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
         from stola.orthology import classify_orthology
@@ -658,9 +840,9 @@ class WorkflowTests(unittest.TestCase):
             bed.write_text(
                 "\n".join(
                     [
-                        "chr1\t0\t50\tCNEE_SOLID",
+                        "chr1\t0\t50\tCNEE_HIGH_ID",
                         "chr1\t100\t150\tCNEE_SEQ_MISSING",
-                        "chr1\t200\t250\tCNEE_NONSOLID",
+                        "chr1\t200\t250\tCNEE_LOW_ID",
                         "chr1\t300\t350\tCNEE_GAP_ONLY",
                         "chr1\t400\t450\tCNEE_MISSING",
                         "",
@@ -688,16 +870,14 @@ class WorkflowTests(unittest.TestCase):
                     ]
                 )
                 + "\n"
-                + "CNEE_SOLID\tchr1\t0\t50\t1\t50\tchrQ\t+\t100\t150\tS#1\t0.05\t0.8\t1\n"
+                + "CNEE_HIGH_ID\tchr1\t0\t50\t1\t50\tchrQ\t+\t100\t150\tS#1\t0.05\t0.8\t1\n"
                 + "CNEE_SEQ_MISSING\tchr1\t100\t150\t2\t50\tchrQ\t+\t300\t350\tM#1\t0.05\t.\t1\n"
-                + "CNEE_NONSOLID\tchr1\t200\t250\t3\t50\tchrQ\t+\t500\t550\tN#1\t0.2\t0.5\t1\n"
+                + "CNEE_LOW_ID\tchr1\t200\t250\t3\t50\tchrQ\t+\t500\t550\tN#1\t0.2\t0.5\t1\n"
                 + "CNEE_GAP_ONLY\tchr1\t300\t350\t4\t0\tchrQ\t+\t.\t.\tG#1\t1.0\t.\t1\n",
                 encoding="utf-8",
             )
 
-            # synteny_check=False: this test is about the solid/non-solid
-            # distinction driving categorization, not the verification feature
-            # itself (covered separately), so pruning is disabled and the
+            # No multi-projection refs here, so filtering is off and the
             # index path is never touched.
             result = classify_orthology(
                 stats,
@@ -711,26 +891,23 @@ class WorkflowTests(unittest.TestCase):
             bed_lines = query_bed.read_text(encoding="utf-8").splitlines()
 
         self.assertEqual(result.orthology_rows, 5)
-        # CNEE_NONSOLID is now a real (weak) one2one query locus rather than
-        # a standalone uncertain_loss row -- it still gets a query CNEE id.
+        # A lone ref/query edge is never filtered, so every aligned ref gets
+        # a query locus, whatever its identity or gap fraction.
         self.assertEqual(result.query_bed_rows, 3)
         self.assertEqual(
             bed_lines,
             [
-                "chrQ\t100\t150\tq_CNEE_SOLID\t0\t+",
+                "chrQ\t100\t150\tq_CNEE_HIGH_ID\t0\t+",
                 "chrQ\t300\t350\tq_CNEE_SEQ_MISSING\t0\t+",
-                "chrQ\t500\t550\tq_CNEE_NONSOLID\t0\t+",
+                "chrQ\t500\t550\tq_CNEE_LOW_ID\t0\t+",
             ],
         )
         categories_by_query = {
             row["query_cnee_id"]: row["orthology_category"] for row in rows
         }
-        self.assertEqual(categories_by_query["q_CNEE_SOLID"], "one2one")
+        self.assertEqual(categories_by_query["q_CNEE_HIGH_ID"], "one2one")
         self.assertEqual(categories_by_query["q_CNEE_SEQ_MISSING"], "one2one")
-        # A lone ref/query edge is always reported as "one2one" now, even if
-        # non-solid -- the one2one(weak) label only ever applied to the raw,
-        # pre-verification graph shape (see out_culled_projections).
-        self.assertEqual(categories_by_query["q_CNEE_NONSOLID"], "one2one")
+        self.assertEqual(categories_by_query["q_CNEE_LOW_ID"], "one2one")
         na_categories = {
             row["partner_ref_cnees"]: row["orthology_category"]
             for row in rows
@@ -738,73 +915,6 @@ class WorkflowTests(unittest.TestCase):
         }
         self.assertEqual(na_categories["CNEE_GAP_ONLY"], "lost")
         self.assertEqual(na_categories["CNEE_MISSING"], "unaligned")
-
-    def test_orthology_keeps_lone_edge_as_one2one_when_no_single_projection_is_solid(
-        self,
-    ) -> None:
-        if not _has_networkx():
-            self.skipTest("networkx is not installed")
-        from stola.orthology import classify_orthology
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            bed = tmp_path / "cnees.bed"
-            stats = tmp_path / "stats.tsv"
-            orthology = tmp_path / "orthology.tsv"
-            query_bed = tmp_path / "query.bed"
-            bed.write_text("chr1\t0\t50\tCNEE_A\n", encoding="utf-8")
-            stats.write_text(
-                "\t".join(
-                    [
-                        "cnee_uid",
-                        "ref_chrom",
-                        "ref_start",
-                        "ref_end",
-                        "chain_id",
-                        "aligned_bases",
-                        "query_chrom",
-                        "query_strand",
-                        "query_aligned_start",
-                        "query_aligned_end",
-                        "query_projection_name",
-                        "gap_fraction_within_chain_span",
-                        "seq_identity",
-                        "rank_by_chain_score",
-                    ]
-                )
-                + "\n"
-                # Good identity, bad gap on its own.
-                + "CNEE_A\tchr1\t0\t50\t1\t50\tchrQ\t+\t100\t150\tA#1\t0.5\t0.9\t1\n"
-                # Good gap, bad identity on its own. Same query cluster as A#1
-                # (overlapping query coordinates) so both land on one edge.
-                + "CNEE_A\tchr1\t0\t50\t1\t45\tchrQ\t+\t120\t180\tA#2\t0.05\t0.3\t2\n",
-                encoding="utf-8",
-            )
-
-            # synteny_check=False: no other CNEEs exist to verify against, and
-            # this test is specifically about the solid/non-solid distinction.
-            result = classify_orthology(
-                stats,
-                bed,
-                tmp_path / "unused_index.json",
-                orthology,
-                query_bed,
-                filter_multi_projections=False,
-            )
-            rows = _read_tsv(orthology)
-
-        # Blending would give (max identity 0.9, min gap 0.05), which passes
-        # both thresholds. Neither projection alone does, so the edge isn't
-        # solid -- but it's still the only ref/query pair here, so it's kept
-        # as a one2one call (the weak/solid distinction only matters for the
-        # raw pre-verification category, not final output) rather than
-        # dropped to uncertain_loss.
-        self.assertEqual(result.query_bed_rows, 1)
-        self.assertEqual(result.orthology_rows, 1)
-        categories_by_query = {
-            row["query_cnee_id"]: row["orthology_category"] for row in rows
-        }
-        self.assertEqual(categories_by_query["q_CNEE_A"], "one2one")
 
     def test_classify_orthology_uses_custom_query_id_prefix(self) -> None:
         if not _has_networkx():
@@ -1052,6 +1162,106 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(culled_row["locus_depth"], "2")
         self.assertEqual(culled_row["local_score"], ".")
 
+    def test_relative_score_filtering_scores_minus_strand_chain_on_reverse_complement(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+
+        # MULTI = chr1:150-200 has two candidate chains (initial one2many):
+        #   chain 1: chr1 -> chrQ1, a perfect, isolated, self-supported
+        #     match -- accepted.
+        #   chain 2: chr1 -> chrQ2's MINUS strand, landing on chrQ2[100,150).
+        #     chr1 is built so that, once chain 2's query bases are
+        #     reverse-complemented, exactly 40% of that locus matches.
+        #   chain 3: chr2 -> chrQ2's plus strand, a perfect match over the
+        #     same locus (not a candidate: chr2 has no CNEE).
+        # Chain 2's relative score is therefore exactly 0.4 and it is
+        # rejected. Wrong minus-strand coordinates or a missing reverse
+        # complement would give a different identity.
+        rng = random.Random(7)
+        query = "".join(rng.choice("ACGT") for _ in range(300))
+        complement = str.maketrans("ACGT", "TGCA")
+        chr1 = ["A"] * 300
+        for offset in range(200):
+            # chr1[50 + offset] aligns to minus-strand chrQ2, i.e. the
+            # complement of plus-strand position 249 - offset.
+            query_pos = 249 - offset
+            base = query[query_pos]
+            chr1[50 + offset] = base.translate(complement) if query_pos % 5 < 2 else base
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, orthology_rows, culled_rows = _classify_with_filtering(
+                Path(tmpdir),
+                "chr1\t150\t200\tMULTI\n",
+                [
+                    "chain 100 chr1 300 + 50 250 chrQ1 300 + 50 250 1",
+                    "200",
+                    "",
+                    "chain 100 chr1 300 + 50 250 chrQ2 300 - 50 250 2",
+                    "200",
+                    "",
+                    "chain 100 chr2 300 + 50 250 chrQ2 300 + 50 250 3",
+                    "200",
+                    "",
+                ],
+                {"chr1": "".join(chr1), "chr2": query},
+                {"chrQ1": "".join(chr1), "chrQ2": query},
+                flank_window=50,
+            )
+
+        self.assertEqual([row["orthology_category"] for row in orthology_rows], ["one2one"])
+        self.assertEqual(result.culled_projection_rows, 1)
+        culled_row = culled_rows[0]
+        self.assertEqual(culled_row["query_chrom"], "chrQ2")
+        self.assertEqual((culled_row["query_start"], culled_row["query_end"]), ("100", "150"))
+        self.assertEqual(culled_row["rejection_reason"], "low_score")
+        # Both the overlap stage and the filter compare against the reverse complement.
+        self.assertAlmostEqual(float(culled_row["sequence_identity"]), 0.4)
+        self.assertAlmostEqual(float(culled_row["local_score"]), 0.4)
+        self.assertAlmostEqual(float(culled_row["best_competitor_local_score"]), 1.0)
+        self.assertAlmostEqual(float(culled_row["relative_score"]), 0.4)
+
+    def test_single_chain_locus_accepts_flank_support_from_another_chain(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+
+        # MULTI = chr1:100-150 has two candidate chains (initial one2many).
+        # Chain 1 lands on an isolated chrQ1 locus whose flanks it covers
+        # itself, so it is accepted. Chain 2 covers only the CNEE,
+        # chr1[100,150) -> chrQ2[100,150): it is the only chain with aligned
+        # bases at that locus, and it leaves its own flanks unaligned.
+        # Chain 3 (not a candidate -- chr2 has no CNEE) aligns both flanks,
+        # chrQ2[50,100) and [150,200), but not the locus itself. With chain 3
+        # present the flanks are covered by another chain, so chain 2's
+        # projection is accepted and MULTI stays one2many; without it, chain
+        # 2 is rejected as no_flank_support and MULTI resolves to one2one.
+        chains = [
+            "chain 100 chr1 300 + 50 250 chrQ1 300 + 50 250 1",
+            "200",
+            "",
+            "chain 100 chr1 300 + 100 150 chrQ2 300 + 100 150 2",
+            "50",
+            "",
+        ]
+        flank_chain = ["chain 100 chr2 700 + 500 650 chrQ2 300 + 50 200 3", "50 50 50", "50", ""]
+        bed_text = "chr1\t100\t150\tMULTI\n"
+        genomes = ({"chr1": "A" * 300, "chr2": "A" * 700}, {"chrQ1": "A" * 300, "chrQ2": "A" * 300})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, supported_rows, supported_culled = _classify_with_filtering(
+                Path(tmpdir) / "supported", bed_text, chains + flank_chain, *genomes, flank_window=50
+            )
+            _, unsupported_rows, unsupported_culled = _classify_with_filtering(
+                Path(tmpdir) / "unsupported", bed_text, chains, *genomes, flank_window=50
+            )
+
+        self.assertEqual({row["orthology_category"] for row in supported_rows}, {"one2many"})
+        self.assertEqual(supported_culled, [])
+
+        self.assertEqual([row["orthology_category"] for row in unsupported_rows], ["one2one"])
+        self.assertEqual(len(unsupported_culled), 1)
+        culled_row = unsupported_culled[0]
+        self.assertEqual(culled_row["query_chrom"], "chrQ2")
+        self.assertEqual(culled_row["rejection_reason"], "no_flank_support")
+        self.assertEqual(float(culled_row["flank_any_coverage"]), 0.0)
+
     def test_ref_cnee_tsv_splits_lost_by_query_assembly_gap_overlap(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
@@ -1121,7 +1331,7 @@ class WorkflowTests(unittest.TestCase):
                 "rank_by_chain_score",
             ]
             rows = [
-                # One clean solid one2one.
+                # One clean, high-identity one2one.
                 ("CNEE_ONE2ONE", "chr1", 100, 150, "1", 50, "chrQ", "+", "1000", "1050", "ONE2ONE#1", "0.05", "0.8"),
                 # Two "lost" candidates (aligned_bases=0) on the same chain.
                 ("CNEE_LOST_GAP", "chr1", 300, 350, "1", 0, "chrQ", "+", ".", ".", "LOSTGAP#1", "1.0", "."),
@@ -1297,7 +1507,7 @@ class WorkflowTests(unittest.TestCase):
                     ]
                 )
                 + "\n"
-                # Same query coordinates, opposite strands, both solid.
+                # Same query coordinates, opposite strands, both high identity.
                 + "CNEE_PLUS\tchr1\t0\t50\t1\t50\tchrQ\t+\t100\t150\tP#1\t0.05\t0.8\t1\n"
                 + "CNEE_MINUS\tchr1\t100\t150\t2\t50\tchrQ\t-\t100\t150\tM#1\t0.05\t0.8\t1\n",
                 encoding="utf-8",
@@ -1394,108 +1604,187 @@ class WorkflowTests(unittest.TestCase):
         summary_uids = {row["cnee_uid"] for row in summary_rows}
         self.assertEqual(summary_uids, {"CNEE_DUP", "CNEE_DUP__line2"})
 
-    def test_orthology_diagnostic_plots_use_category_groups(self) -> None:
-        from stola.plots import write_orthology_diagnostic_plots
+    def test_fasta_accessor_rebuilds_index_when_fasta_changes(self) -> None:
+        from stola.genome_io import FastaAccessor
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            stats = tmp_path / "stats.tsv"
-            orthology = tmp_path / "orthology.tsv"
-            category_plot = tmp_path / "categories.svg"
-            seq_plot = tmp_path / "seq.svg"
-            gap_plot = tmp_path / "gap.svg"
-            stats.write_text(
-                "\t".join(
-                    [
-                        "cnee_uid",
-                        "aligned_bases",
-                        "gap_fraction_within_chain_span",
-                        "seq_identity",
-                    ]
-                )
-                + "\n"
-                + "CNEE_SOLID\t50\t0.05\t0.8\n"
-                + "CNEE_NONSOLID\t50\t0.2\t0.5\n"
-                + "CNEE_LOST\t0\t1.0\t.\n",
+            fasta = tmp_path / "genome.fa"
+            index = tmp_path / "genome.idx"
+            fasta.write_text(">chr1\nAAAAAAAAAA\nCCCCCCCCCC\n", encoding="utf-8")
+            accessor = FastaAccessor(fasta, index)
+            accessor.close()
+
+            # Same index path, different genome: the old byte offsets would
+            # point into the wrong sequence, so the index must be rebuilt.
+            fasta.write_text(">chrX\nGGGG\n>chr1\nTTTTT\nTTTTT\nAAAAA\n", encoding="utf-8")
+            accessor = FastaAccessor(fasta, index)
+            try:
+                self.assertEqual(accessor.fetch("chr1", 8, 12), "TTAA")
+            finally:
+                accessor.close()
+
+            # An index without a #source line (older stola) is rebuilt too.
+            index.write_text(
+                "#seq_id\tlength\toffset\tline_bases\tline_width\nchr1\t15\t0\t5\t6\n",
                 encoding="utf-8",
             )
-            orthology.write_text(
-                "\t".join(
-                    [
-                        "query_cnee_id",
-                        "partner_ref_cnees",
-                        "orthology_category",
-                    ]
-                )
-                + "\n"
-                + "q_CNEE_SOLID\tCNEE_SOLID\tone2one\n"
-                + "NA\tCNEE_NONSOLID\tuncertain_loss\n"
-                + "NA\tCNEE_LOST\tlost\n",
-                encoding="utf-8",
-            )
+            accessor = FastaAccessor(fasta, index)
+            try:
+                self.assertEqual(accessor.fetch("chr1", 0, 15), "T" * 10 + "A" * 5)
+                self.assertIn("chrX", accessor.records)
+            finally:
+                accessor.close()
+            self.assertTrue(index.read_text(encoding="utf-8").startswith("#source\t"))
 
-            result = write_orthology_diagnostic_plots(
-                stats,
-                orthology,
-                category_plot,
-                seq_plot,
-                gap_plot,
-                min_sequence_identity=0.7,
-                max_fraction_gap=0.1,
-            )
-            category_text = category_plot.read_text(encoding="utf-8")
-            seq_text = seq_plot.read_text(encoding="utf-8")
-            gap_text = gap_plot.read_text(encoding="utf-8")
+    def test_reverse_complement_matches_biopython(self) -> None:
+        from Bio.Seq import Seq
 
-        self.assertEqual(result.category_counts["one2one"], 1)
-        self.assertEqual(result.category_counts["uncertain_loss"], 1)
-        self.assertEqual(result.category_counts["lost"], 1)
-        self.assertEqual(result.sequence_identity_counts["one2one"], 1)
-        self.assertEqual(result.sequence_identity_counts["uncertain_loss"], 1)
-        self.assertEqual(result.gap_fraction_counts["lost"], 1)
-        self.assertIn("Orthology category counts", category_text)
-        self.assertIn("Sequence identity by orthology category", seq_text)
-        self.assertIn("Gap fraction by orthology category", gap_text)
+        from stola.genome_io import reverse_complement
 
-    def test_multi_alignment_metric_plots_filter_by_summary_counts(self) -> None:
-        from stola.plots import write_multi_alignment_metric_densities
+        seq = "ACGTNacgtnRYKMBVDHSWUu"
+        self.assertEqual(reverse_complement(seq), str(Seq(seq).reverse_complement()))
+
+    def test_vectorized_block_parser_matches_iter_chain_blocks(self) -> None:
+        from stola.chain import BlockIndex, RefBlockIndex, iter_chain_blocks, parse_chain_blocks
+        from stola.models import ChainBlock
+
+        chains = [
+            # Plus-strand query, with gaps on one or both sides.
+            "chain 1000 chr1 1000 + 100 400 chrQ 900 + 200 500 1\n50 10 30\n100 20 0\n120\n",
+            # Minus-strand query: reference and query run in opposite directions.
+            "chain 900 chr1 1000 + 100 400 chrQ 900 - 200 500 2\n50 10 30\n100 20 0\n120\n",
+            # A single block.
+            "chain 50 chr1 1000 + 10 60 chrQ 900 - 0 50 3\n50\n",
+        ]
+        for chain_text in chains:
+            with self.subTest(chain=chain_text.splitlines()[0]):
+                expected = iter_chain_blocks(chain_text)
+                query_blocks = parse_chain_blocks(chain_text)
+                parsed = [
+                    ChainBlock(int(ref_start), int(ref_end), int(query_start), int(query_end))
+                    for ref_start, ref_end, query_start, query_end in zip(
+                        query_blocks.ref_starts,
+                        query_blocks.ref_ends,
+                        query_blocks.query_starts,
+                        query_blocks.query_ends,
+                    )
+                ]
+                self.assertEqual(parsed, sorted(expected, key=lambda block: block.query_start))
+
+                # The overlap stage's reference-ordered lookup agrees with BlockIndex.
+                ref_index = RefBlockIndex.from_query_blocks(query_blocks)
+                block_index = BlockIndex.from_blocks(expected)
+                for start, end in [(0, 1000), (95, 105), (140, 175), (155, 165), (260, 300), (399, 450)]:
+                    self.assertEqual(
+                        ref_index.overlapping(start, end), list(block_index.overlapping(start, end))
+                    )
+
+    def test_cross_orthology_label_keeps_whole_query_prefix(self) -> None:
+        from stola.cross_orthology import collect_cross_run_orthology
+        from stola.orthology import ORTHOLOGY_COLUMNS, REF_CNEE_COLUMNS
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            summary = tmp_path / "summary.tsv"
-            stats = tmp_path / "stats.tsv"
-            seq_plot = tmp_path / "multi_seq.svg"
-            gap_plot = tmp_path / "multi_gap.svg"
-            summary.write_text(
-                "cnee_uid\tnum_query_alignments\n"
-                "CNEE_SINGLE\t1\n"
-                "CNEE_MULTI\t2\n"
-                "CNEE_ZERO\t0\n",
-                encoding="utf-8",
-            )
-            stats.write_text(
-                "cnee_uid\tgap_fraction_within_chain_span\tseq_identity\n"
-                "CNEE_SINGLE\t0.05\t0.9\n"
-                "CNEE_MULTI\t0.1\t0.8\n"
-                "CNEE_MULTI\t0.4\t.\n"
-                "CNEE_ZERO\t1.0\t.\n",
-                encoding="utf-8",
-            )
+            many_refs = ",".join(f"cnee_{index}" for index in range(20_000))
+            run_dirs = []
+            for name, prefix in (
+                ("run_a", "Anas_platyrhynchos_"),
+                ("run_b", "Anas_acuta_"),
+                ("run_c", "q_"),
+            ):
+                run_dir = tmp_path / name
+                run_dir.mkdir()
+                (run_dir / "query_ortho_status.tsv").write_text(
+                    "\t".join(ORTHOLOGY_COLUMNS) + "\n"
+                    + "NA\tcnee_1\tunaligned\tNA\tNA\n"
+                    # A many2one group big enough to pass csv's default field limit.
+                    + f"{prefix}many2one_000001\t{many_refs}\tmany2one\t0.9\t0.0\n"
+                    # The query id embeds the ref id with ":" cleaned to "_".
+                    + f"{prefix}chr1_10-20\tchr1:10-20\tone2one\t0.9\t0.0\n",
+                    encoding="utf-8",
+                )
+                (run_dir / "ref_ortho_status.tsv").write_text(
+                    "\t".join(REF_CNEE_COLUMNS) + "\n", encoding="utf-8"
+                )
+                run_dirs.append((run_dir, None, None))
 
-            result = write_multi_alignment_metric_densities(
-                summary,
-                stats,
-                seq_plot,
-                gap_plot,
-            )
-            seq_text = seq_plot.read_text(encoding="utf-8")
-            gap_text = gap_plot.read_text(encoding="utf-8")
+            columns = collect_cross_run_orthology(run_dirs, build_fasta_data=False)
 
-        self.assertEqual(result.multi_alignment_ref_count, 1)
-        self.assertEqual(result.sequence_identity_density_n, 1)
-        self.assertEqual(result.gap_fraction_density_n, 2)
-        self.assertIn("Sequence identity density for multi-query CNEEs", seq_text)
-        self.assertIn("Gap fraction density for multi-query CNEEs", gap_text)
+        # The default prefix falls back to the run directory's name.
+        self.assertEqual(
+            [column.label for column in columns], ["Anas_platyrhynchos", "Anas_acuta", "run_c"]
+        )
+
+    def test_cross_orthology_summary_mode_combines_runs(self) -> None:
+        from stola.cross_orthology import (
+            _compute_frequency_distributions,
+            _read_run_dirs,
+            collect_cross_run_orthology,
+            main,
+        )
+        from stola.orthology import ORTHOLOGY_COLUMNS, REF_CNEE_COLUMNS
+
+        categories = {
+            "run_a": {"ce1": "one2one", "ce2": "missing/loss", "ce3": "one2many"},
+            "run_b": {"ce1": "one2one", "ce2": "one2one", "ce3": "probable_loss"},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            ref_bed = tmp_path / "ref.bed"
+            ref_bed.write_text(
+                "chr1\t0\t50\tce1\nchr1\t100\t150\tce2\nchr1\t200\t250\tce3\n", encoding="utf-8"
+            )
+            for name, category_by_ref in categories.items():
+                run_dir = tmp_path / name
+                run_dir.mkdir()
+                (run_dir / "ref_ortho_status.tsv").write_text(
+                    "\t".join(REF_CNEE_COLUMNS) + "\n"
+                    + "".join(
+                        f"{ref}\t{category}\t1\t0\t{category}\n"
+                        for ref, category in category_by_ref.items()
+                    ),
+                    encoding="utf-8",
+                )
+                (run_dir / "query_ortho_status.tsv").write_text(
+                    "\t".join(ORTHOLOGY_COLUMNS) + "\n" + f"{name}_ce1\tce1\tone2one\t0.9\t0.0\n",
+                    encoding="utf-8",
+                )
+            sheet = tmp_path / "runs.txt"
+            # run_a's label comes from its query ids; run_b's from the sheet's
+            # third column, with the genome column left blank.
+            sheet.write_text(f"{tmp_path / 'run_a'}\n{tmp_path / 'run_b'}\t\tlabel_b\n", encoding="utf-8")
+            out_dir = tmp_path / "out"
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                main([
+                    "summary",
+                    "--query-dirs", str(sheet),
+                    "--ref-bed", str(ref_bed),
+                    "--ref-prefix", "ref",
+                    "--out-dir", str(out_dir),
+                ])
+            combined = (out_dir / "ref_combined_orthology.tsv").read_text(encoding="utf-8").splitlines()
+            plots = sorted(path.name for path in out_dir.glob("*.svg"))
+            columns = collect_cross_run_orthology(_read_run_dirs(sheet), build_fasta_data=False)
+
+        self.assertEqual(
+            combined,
+            [
+                "ref_ID\trun_a\tlabel_b",
+                "ce1\tone2one\tone2one",
+                "ce2\tmissing/loss\tone2one",
+                "ce3\tone2many\tprobable_loss",
+            ],
+        )
+        self.assertEqual(
+            plots, ["ref.loss_frequency_distribution.svg", "ref.multiproj_frequency_distribution.svg"]
+        )
+        # Index i = number of reference CNEEs lost (or multi-projection) in
+        # exactly i of the two runs; missing/loss and probable_loss both count as lost.
+        loss_counts, multi_counts = _compute_frequency_distributions(["ce1", "ce2", "ce3"], columns)
+        self.assertEqual(loss_counts, [1, 2, 0])
+        self.assertEqual(multi_counts, [2, 1, 0])
 
     def test_fasta_accessor_fetches_correctly_across_wrapped_lines(self) -> None:
         from stola.genome_io import FastaAccessor

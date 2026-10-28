@@ -19,7 +19,7 @@ viz = ["matplotlib>=3.7"]
 cluster = ["matplotlib>=3.7", "pandas", "toytree>=3.0"]
 
 [project.urls]
-Homepage = "https://github.com/danielle-khost/toga4cnee"
+Homepage = "https://github.com/danielle-khost/stola"
 
 [project.scripts]
 stola = "stola.cli:main"

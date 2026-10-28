@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import csv
-from bisect import bisect_right
 from collections import Counter, defaultdict
-from dataclasses import dataclass
 from typing import Iterator
 from pathlib import Path
 
-from .chain import iter_chain_blocks
+from .chain import RefBlockIndex, parse_chain_blocks, read_chain_text
 from .candidates import CANDIDATE_COLUMNS
-from .index import load_index
-from .intervals import fraction, overlap_length
-from .models import ChainBlock, ChainRecord
+from .index import ChainIndex, as_chain_index
+from .intervals import fraction
+from .models import ChainRecord
 from .sequence_compare import (
     MISSING_SEQUENCE_METRICS,
     SEQUENCE_COLUMNS,
@@ -38,28 +36,6 @@ OVERLAP_COLUMNS = CANDIDATE_COLUMNS + [
 ] + SEQUENCE_COLUMNS
 
 
-@dataclass(frozen=True)
-class BlockIndex:
-    blocks: list[ChainBlock]
-    ref_ends: list[int]
-
-    @classmethod
-    def from_blocks(cls, blocks: list[ChainBlock]) -> "BlockIndex":
-        # Sort blocks and cache reference ends for fast overlap lookups.
-        ordered = sorted(blocks, key=lambda block: (block.ref_start, block.ref_end))
-        return cls(ordered, [block.ref_end for block in ordered])
-
-    def overlapping(self, start: int, end: int) -> Iterator[ChainBlock]:
-        # Yield blocks whose reference intervals overlap the requested span.
-        index = bisect_right(self.ref_ends, start)
-        while index < len(self.blocks):
-            block = self.blocks[index]
-            if block.ref_start >= end:
-                break
-            yield block
-            index += 1
-
-
 def read_candidates(path: str | Path) -> list[dict[str, str]]:
     # Load the candidate TSV and verify it has the expected columns.
     with Path(path).open("r", encoding="utf-8", newline="") as handle:
@@ -68,57 +44,6 @@ def read_candidates(path: str | Path) -> list[dict[str, str]]:
         if missing:
             raise ValueError(f"Candidate file is missing columns: {', '.join(missing)}")
         return list(reader)
-
-
-def _project_overlap_to_query(
-    block: ChainBlock,
-    query_strand: str,
-    ref_overlap_start: int,
-    ref_overlap_end: int,
-) -> tuple[int, int]:
-    # Convert a reference-side block overlap into query-side coordinates.
-    offset_start = ref_overlap_start - block.ref_start
-    offset_end = ref_overlap_end - block.ref_start
-    if query_strand == "+":
-        query_start = block.query_start + offset_start
-        query_end = block.query_start + offset_end
-    else:
-        query_start = block.query_end - offset_end
-        query_end = block.query_end - offset_start
-    return min(query_start, query_end), max(query_start, query_end)
-
-
-def _aligned_bases(
-    blocks: BlockIndex,
-    start: int,
-    end: int,
-    query_strand: str | None = None,
-) -> tuple[int, int | None, int | None, list[tuple[int, int]]]:
-    # Count aligned bases and collect merged query segments for a ref interval.
-    aligned = 0
-    query_segments: list[tuple[int, int]] = []
-    for block in blocks.overlapping(start, end):
-        overlap = overlap_length(start, end, block.ref_start, block.ref_end)
-        if overlap == 0:
-            continue
-        ref_overlap_start = max(start, block.ref_start)
-        ref_overlap_end = min(end, block.ref_end)
-        aligned += overlap
-        if query_strand is not None:
-            query_segments.append(
-                _project_overlap_to_query(
-                    block, query_strand, ref_overlap_start, ref_overlap_end
-                )
-            )
-    if not query_segments:
-        return aligned, None, None, []
-    merged_segments = _merge_segments(query_segments)
-    return (
-        aligned,
-        min(segment[0] for segment in merged_segments),
-        max(segment[1] for segment in merged_segments),
-        merged_segments,
-    )
 
 
 def _merge_segments(segments: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -165,28 +90,34 @@ def _rank_candidates(rows: list[dict[str, str]]) -> dict[tuple[str, str], int]:
 
 
 def iter_overlap_rows(
-    index_path: str | Path,
+    chain_index: ChainIndex | str | Path,
     candidate_path: str | Path,
     sequence_comparator: SequenceComparator | None = None,
 ) -> Iterator[dict[str, str | int | float]]:
     # Stream one overlap-stat row per candidate chain/CNEE pair.
-    payload, records = load_index(index_path)
-    chain_path = payload["indexed_chain_path"]
-    record_by_id: dict[str, ChainRecord] = {record.chain_id: record for record in records}
+    chain_index = as_chain_index(chain_index)
+    record_by_id: dict[str, ChainRecord] = {
+        record.chain_id: record for record in chain_index.records
+    }
     candidates = read_candidates(candidate_path)
     candidate_counts = Counter(row["cnee_uid"] for row in candidates)
     ranks = _rank_candidates(candidates)
-    block_cache: dict[str, BlockIndex] = {}
+    block_cache: dict[str, RefBlockIndex] = {}
+    cached_chrom: str | None = None
 
-    with Path(chain_path).open("rb") as chain_handle:
+    with chain_index.indexed_chain_path.open("rb") as chain_handle:
         for candidate in candidates:
+            if candidate["ref_chrom"] != cached_chrom:
+                # Candidates are sorted by reference chromosome, and a chain
+                # aligns to a single reference chromosome, so the previous
+                # chromosome's chains are never needed again.
+                block_cache.clear()
+                cached_chrom = candidate["ref_chrom"]
             chain_id = candidate["chain_id"]
             record = record_by_id[chain_id]
             if chain_id not in block_cache:
-                chain_handle.seek(record.start_byte)
-                chain_text = chain_handle.read(record.byte_length).decode("utf-8")
-                block_cache[chain_id] = BlockIndex.from_blocks(
-                    iter_chain_blocks(chain_text)
+                block_cache[chain_id] = RefBlockIndex.from_query_blocks(
+                    parse_chain_blocks(read_chain_text(chain_handle, record))
                 )
             blocks = block_cache[chain_id]
 
@@ -194,11 +125,17 @@ def iter_overlap_rows(
             ref_end = int(candidate["ref_end"])
             cnee_len = ref_end - ref_start
             span_overlap = int(candidate["span_overlap_bases"])
-            overlapping_blocks = list(blocks.overlapping(ref_start, ref_end))
-            cnee_block_index = BlockIndex.from_blocks(overlapping_blocks)
-            aligned, query_start, query_end, query_segments = _aligned_bases(
-                cnee_block_index, ref_start, ref_end, record.query_strand
+            # Each aligned block's overlap with the CNEE, paired with its
+            # query-side projection.
+            aligned_segments = aligned_segments_for_interval(
+                blocks.overlapping(ref_start, ref_end), ref_start, ref_end, record.query_strand
             )
+            aligned = sum(segment.ref_end - segment.ref_start for segment in aligned_segments)
+            query_segments = _merge_segments(
+                [(segment.query_start, segment.query_end) for segment in aligned_segments]
+            )
+            query_start = query_segments[0][0] if query_segments else None
+            query_end = query_segments[-1][1] if query_segments else None
             gap_bases = max(0, span_overlap - aligned)
             query_block_count, query_block_sizes, query_block_starts = _block_fields(
                 query_start, query_segments
@@ -213,9 +150,7 @@ def iter_overlap_rows(
                     ref_end,
                     record.query_chrom,
                     record.query_strand,
-                    aligned_segments_for_interval(
-                        overlapping_blocks, ref_start, ref_end, record.query_strand
-                    ),
+                    aligned_segments,
                 )
 
             output_row: dict[str, str | int | float] = dict(candidate)
@@ -244,22 +179,22 @@ def iter_overlap_rows(
 
 
 def calculate_overlap_rows(
-    index_path: str | Path,
+    chain_index: ChainIndex | str | Path,
     candidate_path: str | Path,
     sequence_comparator: SequenceComparator | None = None,
 ) -> list[dict[str, str | int | float]]:
     # Materialize overlap rows for tests and small programmatic callers.
-    return list(iter_overlap_rows(index_path, candidate_path, sequence_comparator))
+    return list(iter_overlap_rows(chain_index, candidate_path, sequence_comparator))
 
 
 def write_overlap_stats(
-    index_path: str | Path,
+    chain_index: ChainIndex | str | Path,
     candidate_path: str | Path,
     out_path: str | Path,
     sequence_comparator: SequenceComparator | None = None,
 ) -> int:
     # Stream overlap-stat rows straight to disk from an index and candidate table.
-    rows = iter_overlap_rows(index_path, candidate_path, sequence_comparator)
+    rows = iter_overlap_rows(chain_index, candidate_path, sequence_comparator)
     count = 0
     with Path(out_path).open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=OVERLAP_COLUMNS, delimiter="\t")

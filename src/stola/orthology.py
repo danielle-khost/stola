@@ -9,10 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+import networkx as nx
+
 from .assembly_gaps import DEFAULT_MIN_GAP_LENGTH, NRunIndex, scan_query_assembly_gaps
 from .bed import parse_bed
-from .chain import BlockIndex, _flanking_blocks, iter_chain_blocks
-from .index import load_index
+from .chain import BlockIndex, _flanking_blocks, iter_chain_blocks, read_chain_text
+from .index import ChainIndex, as_chain_index
 from .models import ChainRecord
 from .sequence_compare import SequenceComparator
 from .spurious_filter import (
@@ -62,8 +64,7 @@ REF_CNEE_COLUMNS = [
 
 # Fallback ref category for a "lost" ref (chain overlap, zero aligned bases)
 # when the query assembly's gap-marker convention can't be confidently
-# inferred (or no query FASTA was supplied at all) -- see
-# orthology_classification.md and assembly_gaps.py.
+# inferred (or no query FASTA was supplied at all) -- see assembly_gaps.py.
 UNCERTAIN_LOSS_TYPE_CATEGORY = "missing/loss"
 
 # Prefix prepended to every graph-assigned query CNEE id (e.g. "q_ce1234").
@@ -117,9 +118,8 @@ class EdgeMetrics:
     projection_metrics: list[tuple[float | None, float]] = field(default_factory=list)
 
     def add_projection(self, projection: Projection) -> None:
-        # Keep each projection's own (identity, gap) pair. Solidity is judged
-        # per single projection, never blended across projections landing on
-        # the same ref/query edge.
+        # Keep each projection's own (identity, gap) pair rather than
+        # blending projections that land on the same ref/query edge.
         self.projection_metrics.append(
             (projection.sequence_identity, projection.fraction_gap)
         )
@@ -168,7 +168,7 @@ class OrthologyResult:
 def classify_orthology(
     stats_path: str | Path,
     cnee_bed: str | Path,
-    index_path: str | Path,
+    chain_index: ChainIndex | str | Path,
     out_orthology: str | Path,
     out_query_bed: str | Path,
     sequence_comparator: SequenceComparator | None = None,
@@ -230,8 +230,8 @@ def classify_orthology(
     given ref's own chain gap is itself ambiguous, this falls back to the
     collapsed "missing/loss" category instead of guessing. This sub-
     categorization, plus per-ref pruning counts, is written to out_ref_cnees
-    if given (see output_files.md) -- out_orthology's own "lost"/"unaligned"
-    labels are unaffected either way.
+    if given (see the README's Output section) -- out_orthology's own
+    "lost"/"unaligned" labels are unaffected either way.
 
     Every graph-assigned query CNEE id is prefixed with query_id_prefix
     (default "q_", e.g. "q_ce1234"). A trailing "_" is appended automatically
@@ -242,13 +242,6 @@ def classify_orthology(
         raise ValueError("soft_depth_limit must be at least 1")
     if query_id_prefix and not query_id_prefix.endswith("_"):
         query_id_prefix = f"{query_id_prefix}_"
-    try:
-        import networkx as nx
-    except ImportError as exc:
-        raise RuntimeError(
-            "networkx is required for orthology classification. "
-            "Activate the biopython conda environment or install networkx."
-        ) from exc
 
     ref_intervals = parse_bed(cnee_bed)
     ref_ids = [interval.cnee_uid for interval in ref_intervals]
@@ -256,22 +249,23 @@ def classify_orthology(
     refs_with_any_projection = {projection.ref_id for projection in evidence.projections}
 
     initial_clusters = _cluster_query_projections(evidence.projections)
-    initial_graph = _build_orthology_graph(nx, ref_ids, initial_clusters)
+    initial_graph = _build_orthology_graph(ref_ids, initial_clusters)
 
     # Chain index is needed both by filtering (chain-envelope search + block
     # parsing for scoring) and by the lost-ref gap-boundary check below;
-    # loaded at most once and shared between whichever of those need it.
+    # loaded at most once (if given as a path) and shared between them.
     need_chain_index = filter_multi_projections or out_ref_cnees is not None
     chain_records: list[ChainRecord] = []
-    indexed_chain_path: str | Path = index_path
+    indexed_chain_path: Path | None = None
     if need_chain_index:
-        payload, chain_records = load_index(index_path)
-        indexed_chain_path = payload["indexed_chain_path"]
+        chain_index = as_chain_index(chain_index)
+        chain_records = chain_index.records
+        indexed_chain_path = chain_index.indexed_chain_path
 
     culled: list[CulledProjection] = []
     initial_category_by_ref: dict[str, str] = {}
     if filter_multi_projections:
-        initial_category_by_ref = _initial_category_by_ref(nx, initial_graph)
+        initial_category_by_ref = _initial_category_by_ref(initial_graph)
         if initial_category_by_ref:
             if sequence_comparator is None:
                 raise ValueError(
@@ -293,7 +287,7 @@ def classify_orthology(
         else:
             surviving = list(evidence.projections)
         final_clusters = _cluster_query_projections(surviving)
-        final_graph = _build_orthology_graph(nx, ref_ids, final_clusters)
+        final_graph = _build_orthology_graph(ref_ids, final_clusters)
     else:
         final_clusters = initial_clusters
         final_graph = initial_graph
@@ -462,8 +456,8 @@ def _add_cluster_edge_metrics(cluster: QueryCluster, projection: Projection) -> 
     metrics.add_projection(projection)
 
 
-def _build_orthology_graph(nx, ref_ids: list[str], clusters: list[QueryCluster]):
-    # Build a ref/query graph with sequence identity and gap fraction edge scores.
+def _build_orthology_graph(ref_ids: list[str], clusters: list[QueryCluster]):
+    # Build a ref/query graph, recording each edge's projection metrics.
     graph = nx.Graph()
     for ref_id in ref_ids:
         graph.add_node(_ref_node(ref_id), kind="ref", ref_id=ref_id)
@@ -489,7 +483,7 @@ def _build_orthology_graph(nx, ref_ids: list[str], clusters: list[QueryCluster])
 # --------------------------------------------------------------------------
 
 
-def _initial_category_by_ref(nx, initial_graph) -> dict[str, str]:
+def _initial_category_by_ref(initial_graph) -> dict[str, str]:
     """Every ref's pre-filtering graph-shape category.
 
     A ref absent from this dict is either a lone one2one edge (never
@@ -609,9 +603,9 @@ def _classify_lost_refs(
         for ref_id, candidate in lost_gap_candidates.items():
             record = record_by_chain_id[candidate.chain_id]
             if candidate.chain_id not in block_cache:
-                chain_handle.seek(record.start_byte)
-                chain_text = chain_handle.read(record.byte_length).decode("utf-8")
-                block_cache[candidate.chain_id] = BlockIndex.from_blocks(iter_chain_blocks(chain_text))
+                block_cache[candidate.chain_id] = BlockIndex.from_blocks(
+                    iter_chain_blocks(read_chain_text(chain_handle, record))
+                )
             blocks = block_cache[candidate.chain_id]
 
             preceding, following = _flanking_blocks(blocks, candidate.ref_start, candidate.ref_end)
@@ -684,6 +678,16 @@ def _assign_orthology_categories(
             cluster = cluster_by_node[query_node]
             cluster.query_cnee_id = query_id
             cluster.orthology_category = category
+
+
+def query_id_prefix_from_one2one(query_cnee_id: str, ref_cnee_id: str) -> str | None:
+    """Recover a run's query id prefix (with its trailing "_") from a one2one
+    pair, whose query id is the prefix followed by the cleaned ref id (see
+    _assign_orthology_categories). None if the id doesn't have that shape."""
+    suffix = _clean_id(ref_cnee_id)
+    if not suffix or not query_cnee_id.endswith(suffix):
+        return None
+    return query_cnee_id[: -len(suffix)]
 
 
 def _write_orthology_tsv(
@@ -832,7 +836,7 @@ def _write_ref_cnee_tsv(
     lost_category_by_ref: dict[str, str],
     out_path: str | Path,
 ) -> int:
-    """Write one row per reference CNEE (see output_files.md).
+    """Write one row per reference CNEE (see the README's Output section).
 
     orthology_category is the ref-based final category: one2one/one2many/
     many2one/complex/many2many for a ref with a surviving query edge,

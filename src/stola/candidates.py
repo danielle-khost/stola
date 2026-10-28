@@ -7,7 +7,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from .bed import group_bed_by_chrom, parse_bed
-from .index import load_index
+from .genome_io import strip_accession_version
+from .index import ChainIndex, as_chain_index
 from .intervals import overlap_length
 from .models import BedInterval, ChainRecord
 
@@ -41,14 +42,6 @@ def _group_chains_by_ref_chrom(
     return dict(grouped)
 
 
-def _without_ncbi_version(chrom: str) -> str:
-    # Strip a terminal numeric accession version, for mismatch diagnostics only.
-    prefix, dot, suffix = chrom.rpartition(".")
-    if dot and suffix.isdigit():
-        return prefix
-    return chrom
-
-
 def _check_chromosome_names_match(
     chains_by_chrom: dict[str, list[ChainRecord]],
     cnees_by_chrom: dict[str, list[BedInterval]],
@@ -63,12 +56,12 @@ def _check_chromosome_names_match(
         return
     stripped_chain_chroms: dict[str, str] = {}
     for chrom in sorted(chain_chroms):
-        stripped_chain_chroms.setdefault(_without_ncbi_version(chrom), chrom)
+        stripped_chain_chroms.setdefault(strip_accession_version(chrom), chrom)
 
     mismatches = [
-        (bed_chrom, stripped_chain_chroms[_without_ncbi_version(bed_chrom)])
+        (bed_chrom, stripped_chain_chroms[strip_accession_version(bed_chrom)])
         for bed_chrom in sorted(bed_chroms - chain_chroms)
-        if _without_ncbi_version(bed_chrom) in stripped_chain_chroms
+        if strip_accession_version(bed_chrom) in stripped_chain_chroms
     ]
     if not mismatches:
         return
@@ -142,9 +135,11 @@ def iter_candidate_rows(
     return rows
 
 
-def write_candidates(index_path: str | Path, bed_path: str | Path, out_path: str | Path) -> int:
-    # Load indexed chains and CNEEs, then write the candidate-pair TSV.
-    _, records = load_index(index_path)
+def write_candidates(
+    chain_index: ChainIndex | str | Path, bed_path: str | Path, out_path: str | Path
+) -> int:
+    # Pair indexed chains with CNEEs, then write the candidate-pair TSV.
+    records = as_chain_index(chain_index).records
     cnees = parse_bed(bed_path)
     rows = iter_candidate_rows(records, cnees)
     with Path(out_path).open("w", encoding="utf-8", newline="") as handle:

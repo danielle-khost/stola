@@ -7,8 +7,8 @@ Development repo for toga-like annotations of CNEEs
 stola is packaged for conda (a bioconda release is planned). Until then, build the package from a checkout and install it into its own environment:
 
 ```
-git clone https://github.com/danielle-khost/toga4cnee.git
-cd toga4cnee
+git clone https://github.com/danielle-khost/stola.git
+cd stola
 
 conda create -n conda-build -c conda-forge conda-build
 conda run -n conda-build conda build recipe -c conda-forge -c bioconda --output-folder dist/conda

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .genome_io import open_genome_accessor
+from .genome_io import open_genome_accessor, reverse_complement
 from .models import ChainBlock
 
 SEQUENCE_COLUMNS = [
@@ -78,14 +78,6 @@ class SequenceComparator:
                 "seq_identity": ".",
             }
 
-        try:
-            from Bio.Seq import Seq
-        except ImportError as exc:
-            raise RuntimeError(
-                "Biopython is required for sequence comparison. "
-                "Activate the biopython conda environment or install biopython."
-            ) from exc
-
         ref_parts: list[str] = []
         query_parts: list[str] = []
         for segment in aligned_segments:
@@ -94,7 +86,7 @@ class SequenceComparator:
                 query_chrom, segment.query_start, segment.query_end
             )
             if query_strand == "-":
-                query_part = str(Seq(query_part).reverse_complement()).upper()
+                query_part = reverse_complement(query_part)
             ref_parts.append(ref_part)
             query_parts.append(query_part)
 

@@ -30,9 +30,11 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from stola.plots import _svg_header  # noqa: E402
+from stola.plots import svg_header  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -120,14 +122,6 @@ def _histogram_from_spans(
     starts_by_chrom: dict[str, array],
     ends_by_chrom: dict[str, array],
 ) -> dict[int, int]:
-    try:
-        import numpy as np
-    except ImportError as exc:
-        raise RuntimeError(
-            "numpy is required for aligned-block depth computation. "
-            "Activate the biopython conda environment or install numpy."
-        ) from exc
-
     histogram: dict[int, int] = defaultdict(int)
     for chrom, size in chrom_sizes.items():
         starts = np.frombuffer(starts_by_chrom[chrom], dtype=np.int64)
@@ -348,7 +342,7 @@ def write_aligned_block_depth_density(
     gap = 24
     height = title_height + 2 * panel_height + gap
 
-    parts = [_svg_header(width, height)]
+    parts = [svg_header(width, height)]
     if chain_label:
         parts.append(
             f'<text class="title" x="30" y="30" font-size="18">'

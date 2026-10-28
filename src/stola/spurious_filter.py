@@ -12,8 +12,9 @@ once and judging every candidate projection there against the same set:
    first soft_depth_limit (default 20) that actually have aligned bases over
    the window. A projection whose chain doesn't make that cut is rejected
    without being scored (repeat-driven pileup). The scan visits at most
-   SCAN_CAP_MULTIPLIER x soft_depth_limit chains, so cost per locus stays
-   bounded even at pileups thousands of chains deep.
+   SCAN_CAP_MULTIPLIER x soft_depth_limit chains, so scoring cost per locus
+   stays bounded even at pileups thousands of chains deep. (The flank check
+   in step 2 has no such cap: it reads every chain overlapping the flanks.)
 2. Exactly one kept chain ("isolated"): accept iff the projection's own
    flanks (flank_window each side, core excluded) have aligned-block
    coverage from ANY chain above flank_any_coverage_threshold -- a real
@@ -27,8 +28,8 @@ once and judging every candidate projection there against the same set:
    R > relative_score_threshold (default 0.5). Several chains can clear the
    bar at one locus, so genuine many2one/one2many calls survive.
 
-The vectorized block parsing here is what keeps a genome-wide run fast --
-see parse_query_blocks_vectorized's docstring.
+Chain blocks are parsed with numpy (chain.py's parse_query_blocks_vectorized),
+which keeps the many chains read per locus cheap.
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ from typing import Protocol, Sequence
 
 import numpy as np
 
+from .chain import QueryBlocks, parse_chain_blocks, read_chain_text
+from .genome_io import reverse_complement
 from .models import ChainBlock, ChainRecord
 from .sequence_compare import AlignedSegment
 
@@ -60,115 +63,6 @@ REJECTED_LOW_SCORE = "low_score"  # relative score at or below threshold (or no 
 REJECTED_REASON_ORDER = (REJECTED_DEPTH, REJECTED_ISOLATED_NO_FLANK_SUPPORT, REJECTED_LOW_SCORE)
 
 
-@dataclass(frozen=True)
-class QueryBlocks:
-    """A chain's aligned blocks, sorted by query position."""
-
-    query_starts: np.ndarray
-    query_ends: np.ndarray
-    ref_starts: np.ndarray
-    ref_ends: np.ndarray
-
-    def _overlap_range(self, start: int, end: int) -> tuple[int, int]:
-        if end <= start or self.query_starts.size == 0:
-            return 0, 0
-        lo = int(np.searchsorted(self.query_ends, start, side="right"))
-        hi = int(np.searchsorted(self.query_starts, end, side="left"))
-        return lo, max(lo, hi)
-
-    def overlapping(self, start: int, end: int) -> list[ChainBlock]:
-        lo, hi = self._overlap_range(start, end)
-        return [
-            ChainBlock(
-                ref_start=int(self.ref_starts[i]), ref_end=int(self.ref_ends[i]),
-                query_start=int(self.query_starts[i]), query_end=int(self.query_ends[i]),
-            )
-            for i in range(lo, hi)
-        ]
-
-    def aligned_bases(self, start: int, end: int) -> int:
-        """Query bases in [start, end) covered by this chain's aligned blocks."""
-        lo, hi = self._overlap_range(start, end)
-        if hi <= lo:
-            return 0
-        clipped_starts = np.maximum(self.query_starts[lo:hi], start)
-        clipped_ends = np.minimum(self.query_ends[lo:hi], end)
-        return int(np.clip(clipped_ends - clipped_starts, 0, None).sum())
-
-
-def parse_query_blocks_vectorized(header_fields: list[str], body_lines: list[str]) -> QueryBlocks:
-    """Vectorized replacement for chain.py's iter_chain_blocks.
-
-    iter_chain_blocks walks the chain body one line at a time in pure
-    Python, building a ChainBlock dataclass instance per line (with
-    defensive min()/max() calls that are actually always no-ops, since a
-    block's start is provably < its end by construction). Profiling a real
-    genome-wide run showed that loop consuming ~80% of total wall time --
-    almost entirely interpreter overhead, not the actual sequence-comparison
-    work done elsewhere in this module.
-
-    This computes the exact same (ref_start, ref_end, query_start, query_end)
-    per block, but as whole-chain numpy arrays: every body line's (size, dt,
-    dq) is tokenized in ONE big str.split() (the ragged last line, which
-    omits dt/dq, is parsed separately) and cast to an int64 array in one
-    shot, then both coordinate axes are obtained via np.cumsum instead of a
-    running Python counter. Blocks are monotonic along each axis (a single
-    chain's blocks never reorder or overlap), so getting them into ascending
-    query order needs at most one np.flip -- never an O(n log n) sort.
-    """
-    ref_strand = header_fields[4]
-    ref_size = int(header_fields[3])
-    ref_raw_start = int(header_fields[5])
-    query_strand = header_fields[9]
-    query_size = int(header_fields[8])
-    query_raw_start = int(header_fields[10])
-
-    n = len(body_lines)
-    if n == 0:
-        raise ValueError("Cannot parse a chain with no body lines")
-
-    if n > 1:
-        tokens = " ".join(body_lines[:-1]).split()
-        regular = np.array(tokens, dtype=np.int64).reshape(-1, 3)
-        sizes, dts, dqs = regular[:, 0], regular[:, 1], regular[:, 2]
-    else:
-        sizes = np.empty(0, dtype=np.int64)
-        dts = np.empty(0, dtype=np.int64)
-        dqs = np.empty(0, dtype=np.int64)
-
-    last_size = int(body_lines[-1].split()[0])
-    sizes = np.concatenate([sizes, [last_size]])
-    dts = np.concatenate([dts, [0]])
-    dqs = np.concatenate([dqs, [0]])
-
-    prefix_ref = np.concatenate(([0], np.cumsum(sizes + dts)[:-1]))
-    prefix_query = np.concatenate(([0], np.cumsum(sizes + dqs)[:-1]))
-
-    if ref_strand == "+":
-        ref_start = ref_raw_start + prefix_ref
-        ref_end = ref_start + sizes
-    elif ref_strand == "-":
-        ref_end = (ref_size - ref_raw_start) - prefix_ref
-        ref_start = ref_end - sizes
-    else:
-        raise ValueError(f"Invalid chain target strand: {ref_strand}")
-
-    if query_strand == "+":
-        query_start = query_raw_start + prefix_query
-        query_end = query_start + sizes
-    elif query_strand == "-":
-        query_end = (query_size - query_raw_start) - prefix_query
-        query_start = query_end - sizes
-    else:
-        raise ValueError(f"Invalid chain query strand: {query_strand}")
-
-    if query_strand == "-":
-        ref_start, ref_end, query_start, query_end = (
-            arr[::-1] for arr in (ref_start, ref_end, query_start, query_end)
-        )
-    return QueryBlocks(query_start, query_end, ref_start, ref_end)
-
-
 class ChainEnvelopeCache:
     """Lazily parse+cache each chain's aligned blocks, by chain_id."""
 
@@ -180,11 +74,7 @@ class ChainEnvelopeCache:
     def get(self, chain_id: str) -> tuple[ChainRecord, QueryBlocks]:
         record = self.records_by_id[chain_id]
         if chain_id not in self.blocks_by_id:
-            self.handle.seek(record.start_byte)
-            chain_text = self.handle.read(record.byte_length).decode("utf-8")
-            lines = [line for line in chain_text.splitlines() if line]
-            header_fields = lines[0].split()
-            self.blocks_by_id[chain_id] = parse_query_blocks_vectorized(header_fields, lines[1:])
+            self.blocks_by_id[chain_id] = parse_chain_blocks(read_chain_text(self.handle, record))
         return record, self.blocks_by_id[chain_id]
 
     def close(self) -> None:
@@ -255,20 +145,13 @@ def window_matches_for_chain(
     if not segments:
         return 0, 0
 
-    try:
-        from Bio.Seq import Seq
-    except ImportError as exc:
-        raise RuntimeError(
-            "Biopython is required for sequence comparison. Activate the biopython conda environment."
-        ) from exc
-
     total_matches = 0
     total_compared = 0
     for segment in segments:
         ref_part = ref_accessor.fetch(ref_chrom, segment.ref_start, segment.ref_end)
         query_part = query_accessor.fetch(query_chrom, segment.query_start, segment.query_end)
         if query_strand == "-":
-            query_part = str(Seq(query_part).reverse_complement()).upper()
+            query_part = reverse_complement(query_part)
         compared = min(len(ref_part), len(query_part))
         if compared == 0:
             continue
