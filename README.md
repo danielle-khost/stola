@@ -1,4 +1,6 @@
 # `stola`
+[![DOI](https://zenodo.org/badge/1267684507.svg)](https://doi.org/10.5281/zenodo.23779867)
+
 Inspired by [TOGA2](https://github.com/hillerlab/TOGA2), `stola` uses a pairwise chain alignment between a query and reference to annotate conserved non-exonic elements (CNEEs) in the query as well as infer orthological relationships between query and reference for each CNEE.
 
 ## Installation
