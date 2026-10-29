@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/danielle-khost/stola"
+Homepage = "https://github.com/harvardinformatics/stola"
 
 [project.scripts]
 stola = "stola.cli:main"

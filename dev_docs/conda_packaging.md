@@ -32,7 +32,7 @@ Bioconda builds from a public, versioned source tarball, so these must be in pla
 First release:
 1. Tag and push the release (`git tag v0.3.0 && git push origin v0.3.0`), and create a GitHub release from the tag.
 2. Get the tarball's checksum:
-   `curl -sL https://github.com/danielle-khost/stola/archive/refs/tags/v0.3.0.tar.gz | shasum -a 256`
+   `curl -sL https://github.com/harvardinformatics/stola/archive/refs/tags/v0.3.0.tar.gz | shasum -a 256`
 3. Fork `bioconda/bioconda-recipes` and add `recipes/stola/meta.yaml`, copied from `recipe/meta.yaml` but with `source:` replaced by the commented-out `url:` and `sha256:` lines.
 4. Open a pull request. Bioconda's CI lints, builds and tests the recipe, then a bioconda reviewer merges it.
 
