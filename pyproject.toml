@@ -11,12 +11,15 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "STOLA developers" }]
-dependencies = ["biopython>=1.80", "networkx>=3.0", "numpy>=1.24"]
-
-[project.optional-dependencies]
-viz = ["matplotlib>=3.7"]
-# compare-cross-orthology's `cluster` mode
-cluster = ["matplotlib>=3.7", "pandas", "toytree>=3.0"]
+dependencies = [
+    "biopython>=1.80",
+    "networkx>=3.0",
+    "numpy>=1.24",
+    # compare-cross-orthology's cluster mode and scripts/plot_chain_pileup.py
+    "matplotlib>=3.7",
+    "pandas",
+    "toytree>=3.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/danielle-khost/stola"

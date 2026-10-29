@@ -1,13 +1,13 @@
-# stola
-Development repo for toga-like annotations of CNEEs
+# `stola`
+Inspired by [TOGA2](https://github.com/hillerlab/TOGA2), `stola` uses a pairwise chain alignment between a query and reference to annotate conserved non-exonic elements (CNEEs) in the query as well as infer orthological relationships between query and reference for each CNEE.
 
 ## Installation
 
-### Conda (recommended)
+### Conda
 stola is packaged for conda (a bioconda release is planned). Until then, build the package from a checkout and install it into its own environment:
 
 ```
-git clone https://github.com/danielle-khost/stola.git
+git clone https://github.com/harvardinformatics/stola.git
 cd stola
 
 conda create -n conda-build -c conda-forge conda-build
@@ -20,16 +20,35 @@ conda activate stola
 This installs the `stola` pipeline and the `stola-compare-cross-orthology` utility, with all of their dependencies.
 
 ### pip
-For development, install from a checkout with `pip` instead:
+You can also install from a checkout with `pip` instead:
 
 ```
-pip install .              # core pipeline
-pip install ".[cluster]"   # plus the dependencies of compare-cross-orthology's cluster mode
+cd stola/
+pip install .
 ```
 
-## Current CLI
+## Pipeline overview
+CNEE annotations in the reference are overlapped with chain alignments to identify candidate CNEE projections in the query. If a reference CNEE overlaps only a single query locus, it is accepted as a one-to-one ortholog (one2one); for multi-projection cases, candidates are filtered to remove spurious/repeat-driven alignments as follows:
 
-Run the first workflow pass with one command:
+### Multi-projection filtering
+Projections of ref CNEEs with more than one candidate (i.e. putative one2many, many2one, complex) are evaluated based on their alignment over the CNEE + flanking regions vs competing alignment at that locus. For each query locus, every chain aligned gets a local score (sequence identity over the locus x aligned fraction over the locus plus flanks). The local score of each projection is normalized per-locus by dividing by the max-scoring projection (R = S / S(max)) and a projection is kept if its relative score is above a fraction of the best chain at that locus (R > 0.5).
+
+### Orthology categories
+- `one2one`: single reference CNEE with single query projection
+- `one2many`: single reference CNEE duplicated in query (>= 2 projections)
+- `many2one`: single query CNEE duplicated in reference
+- `complex/many2many`: multiple reference CNEEs match multiple query CNEEs
+
+*Reference only:*
+- `unaligned`: ref CNEE does not overlap **any** chain aligned blocks OR gaps
+- `probable_loss`: ref CNEE occurs in chain gap that does NOT look like contig boundary
+- `assembly_gap_loss`: ref CNEE occurs in chain gap that is likely a contig boundary
+- `uncertain_loss`: ref CNEE with zero projections that passed the filtering steps
+
+
+## Useage
+
+Run the workflow with one command:
 
 ```bash
 stola alignment.chain.gz reference_cnees.bed reference.fa/2bit query.fa/2bit \
@@ -52,7 +71,7 @@ Be sure that the naming conventions match between the chain, BED and genome file
 ### Optional arguments
 `--outdir`: specify where output files will be generated (default: current directory `./`)
 
-`--query_prefix`: the prefix (e.g. species ID) to add to each query CNEE ID. Defaults to `q`, e.g. `q_ce1234`.
+`--query-prefix`: the prefix (e.g. species ID) to add to each query CNEE ID. Defaults to `q`, e.g. `q_ce1234`.
 
 `--relative-score-threshold`: minimum fraction of the locus's best local score needed to keep a projection (default `0.5`)
 
@@ -64,26 +83,6 @@ Be sure that the naming conventions match between the chain, BED and genome file
 
 `--no-filter-multi-projections`: skip this filtering step entirely
 
-
-## Pipeline overview
-
-### Multi-projection filtering
-Projections of ref CNEEs with more than one candidate (one2many, many2one, complex) are filtered per query locus: every chain aligned there gets a local score (sequence identity over the locus x aligned fraction over the locus plus flanks), and a projection is kept if its chain scores above a fraction of the best chain at that locus.
-
-### Orthology categories
-- `one2one`: single reference CNEE with single query projection
-- `one2many`: single reference CNEE duplicated in query (>= 2 projections)
-- `many2one`: multiple reference CNEEs match single query CNEE
-- `complex`: multiple reference CNEEs match multiple query CNEEs
-
-*Query only:*
-- `pruned`: query projection that failed filtering step
-
-*Reference only:*
-- `unaligned`: ref CNEE does not overlap **any** chain aligned blocks OR gaps
-- `probable_loss`: ref CNEE occurs in chain gap that does NOT look like contig boundary
-- `assembly_gap_loss`: ref CNEE occurs in chain gap that is likely a contig boundary
-- `uncertain_loss`: ref CNEE with zero projections that passed the filtering steps
 
 ## Output
 `query_cnees.bed`: annotation file of final CNEE projections to the query genome
@@ -167,23 +166,3 @@ stola-compare-cross-orthology cluster \\
 `cluster` mode computes, per ref CNEE lost in at least `--min-lost` species (default 3; always skipped if lost in 0 or all species, since D is undefined for an invariant trait), the Fritz & Purvis D statistic of phylogenetic signal for its present/lost pattern on a given tree.
 
 The tree's tip labels must exactly match the species labels used as columns in `--orthology-table`. Writes `<ref-prefix>_phylo_d.tsv` (`ref_cnee_id`, `n_lost`, `D`) plus a density plot of D values at `figures/<ref-prefix>.phylo_d_density.png`. D≈0 indicates a clumped/Brownian-motion-like loss pattern (phylogenetic signal); D≈1 indicates no phylogenetic signal (random with respect to the tree). `--n-perms` controls how many permutations/simulations build each of the two null distributions (random, Brownian motion) — these are computed once per distinct count of lost species (not per CNEE), since both null distributions depend only on that count, not on which particular species are lost.
-
-*scripts/chain_depth.py* (run from a repo checkout; not installed with the package): per-base aligned-block chain depth across a chain file's reference and query genomes, written as a two-panel density SVG, with mean/quartile depth printed for each genome:
-
-```
-python scripts/chain_depth.py alignment.chain.gz --out chain_depth.svg --bin-max 100
-```
-
-### Summary figures
-
-For test/evaluation runs, generate the full diagnostic figure set, including
-orthology category counts and category-grouped sequence identity/gap fraction
-densities:
-
-```bash
-python tests/plot_stola_outputs.py \
-  --summary overlap_stats.summary.tsv \
-  --stats overlap_stats.tsv \
-  --orthology query_ortho_status.tsv \
-  --out-dir figures
-```

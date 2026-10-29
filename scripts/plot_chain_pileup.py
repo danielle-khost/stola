@@ -32,8 +32,7 @@ Rows are capped at --max-rows per panel.
 categories present so one2many, many2one and complex loci all appear.
 Figures go to --out-dir (default RUN_DIR/chain_pileups/) with an index.tsv.
 
-Requires matplotlib (`pip install matplotlib`, or `pip install .[viz]` from
-the repo root) in addition to the stola package itself.
+Uses matplotlib, which is installed with the stola package.
 """
 
 from __future__ import annotations
