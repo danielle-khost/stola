@@ -593,6 +593,44 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse((work_dir / "chain_index.json").exists())
             self.assertFalse((work_dir / "candidate_chains.tsv").exists())
 
+    def test_classification_reports_filtering_progress(self) -> None:
+        if not _has_networkx():
+            self.skipTest("networkx is not installed")
+
+        # One ref with a candidate on each of two query chromosomes: an
+        # initial one2many, so its two projections are filtered at two loci.
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _classify_with_filtering(
+                Path(tmpdir),
+                "chr1\t100\t150\tMULTI\n",
+                [
+                    "chain 100 chr1 300 + 50 250 chrQ1 300 + 50 250 1",
+                    "200",
+                    "",
+                    "chain 90 chr1 300 + 50 250 chrQ2 300 + 50 250 2",
+                    "200",
+                    "",
+                ],
+                {"chr1": "A" * 300},
+                {"chrQ1": "A" * 300, "chrQ2": "A" * 300},
+                flank_window=50,
+                progress=messages.append,
+            )
+
+        self.assertEqual(
+            messages,
+            [
+                "Read 2 aligned projections of 1 reference CNEEs",
+                "Filtering 2 projections of 1 multi-projection reference CNEEs, at 2 query loci ...",
+                # With only two loci, the 10%..50% milestones all land on the
+                # first and collapse into one message.
+                "Scored 1/2 query loci (50%)",
+                "Scored 2/2 query loci (100%)",
+                "Assigning final orthology categories ...",
+            ],
+        )
+
     def test_cli_prints_timestamped_progress(self) -> None:
         if not _has_networkx():
             self.skipTest("networkx is not installed")
@@ -1823,6 +1861,57 @@ class WorkflowTests(unittest.TestCase):
 
         self.assertIn("ragged", str(ctx.exception))
         self.assertIn("chr1", str(ctx.exception))
+
+    def test_fasta_accessor_matches_plain_parse_and_reads_each_sequence_once(self) -> None:
+        from unittest import mock
+
+        from stola.genome_io import FastaAccessor
+
+        rng = random.Random(3)
+        for width, newline in [(7, "\n"), (60, "\n"), (61, "\r\n")]:
+            with self.subTest(width=width, newline=newline), tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                records = {
+                    name: "".join(rng.choice("ACGTNacgtn") for _ in range(length))
+                    for name, length in [("chr1", 500), ("chr2", width * 4), ("empty", 0)]
+                }
+                fasta = tmp_path / "genome.fa"
+                with fasta.open("w", encoding="utf-8", newline="") as handle:
+                    for name, seq in records.items():
+                        handle.write(f">{name} description{newline}")
+                        for i in range(0, len(seq), width):
+                            handle.write(seq[i : i + width] + newline)
+
+                accessor = FastaAccessor(fasta, tmp_path / "genome.idx")
+                accessor.handle = mock.Mock(wraps=accessor.handle)
+                try:
+                    for name, seq in records.items():
+                        for _ in range(200):
+                            start = rng.randint(0, len(seq))
+                            end = rng.randint(start, len(seq))
+                            self.assertEqual(accessor.fetch(name, start, end), seq[start:end].upper())
+                    # Each sequence came from a single read of the file.
+                    self.assertEqual(accessor.handle.read.call_count, len(records))
+                finally:
+                    accessor.close()
+
+    def test_fasta_accessor_rejects_blank_line_inside_a_sequence(self) -> None:
+        from stola.genome_io import FastaAccessor
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            fasta = tmp_path / "genome.fa"
+            # A blank line would shift every base after it if the record's
+            # byte layout were trusted, so it must be an error instead.
+            fasta.write_text(">chr1\nAAAAA\n\nCCCCC\nGG\n", encoding="utf-8")
+            accessor = FastaAccessor(fasta, tmp_path / "genome.idx")
+            try:
+                with self.assertRaises(ValueError) as ctx:
+                    accessor.fetch("chr1", 0, 5)
+            finally:
+                accessor.close()
+
+        self.assertIn("blank lines", str(ctx.exception))
 
     def test_sniff_genome_format_detects_twobit_vs_fasta(self) -> None:
         from stola.genome_io import sniff_genome_format

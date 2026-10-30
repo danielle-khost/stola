@@ -27,6 +27,11 @@ from Bio.SeqIO.TwoBitIO import TwoBitIterator
 
 TWOBIT_SIGNATURE = 0x1A412743
 
+# Byte-level uppercasing, for FastaAccessor's single-pass sequence decode.
+_UPPERCASE_BYTES = bytes.maketrans(
+    b"abcdefghijklmnopqrstuvwxyz", b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+
 # IUPAC DNA complement (same mapping as Biopython's Seq.reverse_complement).
 _DNA_COMPLEMENT = str.maketrans(
     "ACGTUMRWSYKVHDBNXacgtumrwsykvhdbnx",
@@ -160,7 +165,16 @@ class FastaRecordIndex:
 
 
 class FastaAccessor:
-    """Random-access FASTA reader with conservative accession-version aliases."""
+    """Random-access FASTA reader with conservative accession-version aliases.
+
+    Like TwoBitAccessor, each sequence is read into memory as a plain
+    uppercase str on first access, in one read of its byte span located via
+    the index, and every fetch after that is a string slice. Fetching from
+    disk instead (one seek and read per FASTA line touched) is cheap on a
+    local disk but slow on network storage, where the pipeline's millions of
+    scattered fetches each become a round trip. Costs up to one full
+    genome's worth of memory, per sequence actually used.
+    """
 
     def __init__(self, fasta_path: str | Path, index_path: str | Path) -> None:
         # Open the FASTA and make sure a byte-offset index built from this
@@ -172,6 +186,7 @@ class FastaAccessor:
         self.records = self._read_index()
         self.aliases = _build_aliases(self.records.keys())
         self.handle = self.fasta_path.open("rb")
+        self._decoded: dict[str, str] = {}
 
     def _source_line(self) -> str:
         # Identifies the FASTA an index was built from. Byte offsets are only
@@ -299,8 +314,25 @@ class FastaAccessor:
                 )
         return records
 
+    def _decoded_sequence(self, resolved: str) -> str:
+        text = self._decoded.get(resolved)
+        if text is None:
+            record = self.records[resolved]
+            full_lines, last_line_bases = divmod(record.length, record.line_bases or 1)
+            self.handle.seek(record.offset)
+            raw = self.handle.read(full_lines * record.line_width + last_line_bases)
+            # One pass both uppercases and drops the line breaks.
+            text = raw.translate(_UPPERCASE_BYTES, b"\r\n").decode("ascii")
+            if len(text) != record.length:
+                raise ValueError(
+                    f"{self.fasta_path}: sequence {resolved!r} has {len(text)} bases where "
+                    f"its line layout implies {record.length}; check it for blank lines "
+                    "inside the sequence"
+                )
+            self._decoded[resolved] = text
+        return text
+
     def fetch(self, seq_id: str, start: int, end: int) -> str:
-        # Fetch a half-open FASTA interval using byte offsets instead of scanning.
         resolved = self.aliases.get(seq_id)
         if resolved is None:
             raise KeyError(f"Sequence {seq_id!r} was not found in {self.fasta_path}")
@@ -309,22 +341,10 @@ class FastaAccessor:
             raise ValueError(
                 f"Invalid interval {seq_id}:{start}-{end} for sequence length {record.length}"
             )
-        remaining = end - start
-        position = start
-        chunks: list[bytes] = []
-        while remaining > 0:
-            line_index = position // record.line_bases
-            line_offset = position % record.line_bases
-            take = min(remaining, record.line_bases - line_offset)
-            byte_offset = record.offset + line_index * record.line_width + line_offset
-            self.handle.seek(byte_offset)
-            chunks.append(self.handle.read(take))
-            position += take
-            remaining -= take
-        return b"".join(chunks).decode("ascii").upper()
+        return self._decoded_sequence(resolved)[start:end]
 
     def close(self) -> None:
-        # Close the underlying FASTA file handle.
+        self._decoded.clear()
         self.handle.close()
 
 

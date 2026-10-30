@@ -165,6 +165,7 @@ def run_workflow(
             min_gap_length=min_gap_length,
             out_ref_cnees=out_ref_cnees,
             query_id_prefix=query_id_prefix,
+            progress=report,
         )
         del chain_index  # Not needed past orthology; free the records.
         report(f"Wrote {orthology_result.query_bed_rows} query CNEE BED rows -> {out_bed}")

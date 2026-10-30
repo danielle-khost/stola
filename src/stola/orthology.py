@@ -7,7 +7,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import networkx as nx
 
@@ -182,6 +182,7 @@ def classify_orthology(
     min_gap_length: int = DEFAULT_MIN_GAP_LENGTH,
     out_ref_cnees: str | Path | None = None,
     query_id_prefix: str = DEFAULT_QUERY_ID_PREFIX,
+    progress: Callable[[str], None] | None = None,
 ) -> OrthologyResult:
     """Classify query CNEE loci from overlap stats and write TSV/BED outputs.
 
@@ -237,7 +238,11 @@ def classify_orthology(
     (default "q_", e.g. "q_ce1234"). A trailing "_" is appended automatically
     if query_id_prefix doesn't already end with one, so "aphWoo" and
     "aphWoo_" both produce ids like "aphWoo_ce1234".
+
+    progress, if given, is called with a one-line message at each sub-step,
+    and every 10% of the way through filtering.
     """
+    report = progress or (lambda message: None)
     if filter_multi_projections and soft_depth_limit < 1:
         raise ValueError("soft_depth_limit must be at least 1")
     if query_id_prefix and not query_id_prefix.endswith("_"):
@@ -247,6 +252,10 @@ def classify_orthology(
     ref_ids = [interval.cnee_uid for interval in ref_intervals]
     evidence = _read_projection_evidence(stats_path)
     refs_with_any_projection = {projection.ref_id for projection in evidence.projections}
+    report(
+        f"Read {len(evidence.projections)} aligned projections of "
+        f"{len(refs_with_any_projection)} reference CNEEs"
+    )
 
     initial_clusters = _cluster_query_projections(evidence.projections)
     initial_graph = _build_orthology_graph(ref_ids, initial_clusters)
@@ -283,9 +292,11 @@ def classify_orthology(
                 relative_score_threshold,
                 flank_window,
                 flank_any_coverage_threshold,
+                report,
             )
         else:
             surviving = list(evidence.projections)
+        report("Assigning final orthology categories ...")
         final_clusters = _cluster_query_projections(surviving)
         final_graph = _build_orthology_graph(ref_ids, final_clusters)
     else:
@@ -312,6 +323,11 @@ def classify_orthology(
             for ref_id, candidate in evidence.zero_aligned_best_row_by_ref.items()
             if ref_id not in refs_with_any_projection
         }
+        if lost_gap_candidates:
+            report(
+                f"Classifying {len(lost_gap_candidates)} lost reference CNEEs as probable "
+                "or assembly-gap losses ..."
+            )
         n_run_index: NRunIndex | None = None
         if query_fasta is not None and lost_gap_candidates:
             gap_convention, candidate_index = scan_query_assembly_gaps(query_fasta, min_gap_length)
@@ -518,6 +534,7 @@ def _filter_multi_projections(
     relative_score_threshold: float,
     flank_window: int,
     flank_any_coverage_threshold: float,
+    report: Callable[[str], None],
 ) -> tuple[list[Projection], list[CulledProjection]]:
     records_by_id = {record.chain_id: record for record in chain_records}
     envelopes = build_query_envelopes(chain_records)
@@ -532,9 +549,17 @@ def _filter_multi_projections(
                 surviving.append(projection)
 
         culled: list[CulledProjection] = []
+        loci = list(_iter_overlapping_projection_groups(eligible))
+        report(
+            f"Filtering {len(eligible)} projections of {len(initial_category_by_ref)} "
+            f"multi-projection reference CNEEs, at {len(loci)} query loci ..."
+        )
+        # Report at every 10% of loci scored. With under 10 loci, milestones
+        # landing on the same locus collapse into one message (the highest).
+        milestones = {(len(loci) * tenth + 9) // 10: tenth * 10 for tenth in range(1, 11)}
         # Every eligible projection sharing a query locus is judged against
         # the same set of chains, scored once at that locus.
-        for locus_projections in _iter_overlapping_projection_groups(eligible):
+        for locus_number, locus_projections in enumerate(loci, start=1):
             scores = score_locus(
                 locus_projections,
                 records_by_id,
@@ -559,6 +584,10 @@ def _filter_multi_projections(
                             verdict=verdict,
                         )
                     )
+            if locus_number in milestones:
+                report(
+                    f"Scored {locus_number}/{len(loci)} query loci ({milestones[locus_number]}%)"
+                )
         return surviving, culled
     finally:
         cache.close()
